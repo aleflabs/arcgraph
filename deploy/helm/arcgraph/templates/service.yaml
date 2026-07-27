@@ -1,0 +1,65 @@
+{{- if .Values.service.headless.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "arcgraph.fullname" . }}-headless
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arcgraph.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "arcgraph.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: mcp
+      port: {{ .Values.mcp.http.port }}
+      targetPort: mcp
+      protocol: TCP
+    - name: admin
+      port: {{ include "arcgraph.adminPort" . }}
+      targetPort: admin
+      protocol: TCP
+{{- end }}
+{{- if .Values.service.loadBalanced.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "arcgraph.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arcgraph.labels" . | nindent 4 }}
+  {{- with .Values.service.loadBalanced.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.loadBalanced.type }}
+  selector:
+    {{- include "arcgraph.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: mcp
+      port: {{ .Values.mcp.http.port }}
+      targetPort: mcp
+      protocol: TCP
+{{- end }}
+{{- if .Values.service.admin.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "arcgraph.fullname" . }}-admin
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arcgraph.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.admin.type }}
+  selector:
+    {{- include "arcgraph.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: admin
+      port: {{ include "arcgraph.adminPort" . }}
+      targetPort: admin
+      protocol: TCP
+{{- end }}

@@ -1,0 +1,1 @@
+0MATCH (n:Person)-[:KNOWS*1..3]->(m) RETURN m

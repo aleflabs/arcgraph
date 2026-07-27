@@ -1,0 +1,113 @@
+{
+  "addr": "127.0.0.1:7687",
+  "n": 5000,
+  "dim": 768,
+  "k": 10,
+  "seed": 765,
+  "surface": "CALL db.index.vector.queryNodes (Bolt, un-throttled)",
+  "duration_s": 15.0,
+  "warmup_s": 4.0,
+  "load": {
+    "requested": 5000,
+    "created": 5000,
+    "verified_count": 5000,
+    "verify_count_error": null,
+    "load_s": 38.75,
+    "nodes_per_s": 129.0,
+    "writers": 8,
+    "errors": 0,
+    "first_errors": []
+  },
+  "smoke": {
+    "served": true,
+    "rows": 10,
+    "top_vids": [
+      0,
+      3886,
+      4787,
+      4218,
+      3833,
+      658,
+      2227,
+      697,
+      3961,
+      3977
+    ],
+    "self_is_rank1": true,
+    "error": null
+  },
+  "recall": {
+    "queries": 150,
+    "k": 10,
+    "recall_at_k": 0.9633,
+    "min_q": 0.8,
+    "perfect_q": 100,
+    "examples": [
+      "q2: exact=[34, 1615, 1871, 2494, 2625, 2824, 3001, 3149, 3988, 4445] got=[34, 1615, 1871, 2494, 2625, 2824, 3149, 3594, 3988, 4445]",
+      "q3: exact=[332, 345, 1467, 1573, 2062, 2082, 2315, 2652, 3322, 4088] got=[332, 345, 1467, 1573, 1724, 2062, 2082, 2652, 3322, 4088]",
+      "q4: exact=[658, 1189, 1321, 1858, 1898, 2155, 2227, 2506, 2687, 3231] got=[658, 796, 1189, 1321, 1858, 1898, 2227, 2506, 2687, 3231]"
+    ]
+  },
+  "levels": [
+    {
+      "concurrency": 1,
+      "duration_s": 15.001,
+      "completed": 5266,
+      "errors": 0,
+      "rps": 351.0,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 2.777,
+        "p95": 3.504,
+        "p99": 3.839,
+        "max": 4.642,
+        "mean": 2.848
+      }
+    },
+    {
+      "concurrency": 4,
+      "duration_s": 15.002,
+      "completed": 15645,
+      "errors": 0,
+      "rps": 1042.8,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 3.676,
+        "p95": 5.025,
+        "p99": 6.284,
+        "max": 12.909,
+        "mean": 3.835
+      }
+    },
+    {
+      "concurrency": 8,
+      "duration_s": 15.002,
+      "completed": 15233,
+      "errors": 0,
+      "rps": 1015.4,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 7.807,
+        "p95": 10.065,
+        "p99": 11.613,
+        "max": 18.224,
+        "mean": 7.876
+      }
+    },
+    {
+      "concurrency": 16,
+      "duration_s": 15.003,
+      "completed": 14663,
+      "errors": 0,
+      "rps": 977.3,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 16.087,
+        "p95": 22.342,
+        "p99": 25.989,
+        "max": 38.993,
+        "mean": 16.363
+      }
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+[package]
+name = "arcgraph-tck"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "openCypher TCK harness for ArcGraph — 220 vendored features + W18δ dual-execute (Bolt 5.0 client + Neo4j oracle + row-set differ + 50 curated queries)."
+categories.workspace = true
+keywords.workspace = true
+publish = false
+
+[dependencies]
+# W18δ — the dual-execute infrastructure (ArcGraphExecutor,
+# Neo4jOracleExecutor, differ, curated query bank) lives in the
+# library crate so downstream test binaries + future fuzz targets
+# can consume the same scaffolding. The cucumber harness in
+# `tests/tck.rs` still consumes these types alongside its gherkin
+# bindings.
+arcgraph-core.workspace = true
+arcgraph-query.workspace = true
+# `arcgraph-mcp` provides the PackStream codec the Neo4j Bolt 5.0
+# oracle client encodes / decodes through. Already-vendored
+# transitive dep; promoted to direct.
+arcgraph-mcp.workspace = true
+# `thiserror` for the dual-execute `ExecutorError` taxonomy.
+thiserror.workspace = true
+
+[dev-dependencies]
+# Apache-2.0 OR MIT — verified via `cargo info cucumber 0.21.1`
+# (license = MIT OR Apache-2.0). cucumber-rs vendors gherkin-rust
+# 0.14+ for `.feature` parsing.
+cucumber = "0.21"
+# Apache-2.0 OR MIT — async runtime for the cucumber harness driver
+# in `tests/tck.rs::main`. `current_thread` flavour is sufficient
+# because `max_concurrent_scenarios(1)` is set to keep the
+# pass/fail/skip report deterministic.
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[[test]]
+name = "tck"
+harness = false
+
+# W24-CYPHER-TCK binary — regenerates the static categorization
+# scorecard markdown by walking the vendored feature tree. Pure
+# filesystem-walk + token-bounded keyword detection — no executor
+# dispatch, no Cypher parse. Cheap enough to run in CI as the
+# "smoke gate" that catches categorization drift before the
+# (heavier) cucumber harness body even loads.
+[[bin]]
+name = "cypher-tck-scorecard"
+path = "src/bin/cypher_tck_scorecard.rs"

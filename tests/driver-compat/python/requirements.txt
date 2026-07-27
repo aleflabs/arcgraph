@@ -1,0 +1,7 @@
+# tests/driver-compat/python — pinned dependencies for the operator-runnable Bolt smoke.
+#
+# License compliance (workspace Apache-2.0 licensing policy):
+#   neo4j (PyPI)         — Apache-2.0 (verified 2026-05-24)
+#
+# Exact version exercised by the public-beta Bolt runbook.
+neo4j==6.2.0

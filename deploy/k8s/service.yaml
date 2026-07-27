@@ -1,0 +1,104 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ArcGraph Services — W24-OPS-α / ADR-093 §D-5.
+#
+# Two Services per the v1.0-GA shape:
+#
+# 1. `arcgraph-headless` — headless Service for the StatefulSet's
+#    stable per-pod DNS (e.g. `arcgraph-0.arcgraph-headless.arcgraph-prod.svc`).
+#    Used by clients that want to address a specific replica.
+#
+# 2. `arcgraph` — ClusterIP Service load-balancing MCP traffic across
+#    all ready replicas. Wired against the `readyz` probe so only
+#    ready pods receive traffic (per ADR-093 §D-1 lifecycle distinction).
+#
+# 3. `arcgraph-admin` — ClusterIP Service for the admin HTTP port.
+#    SEPARATE from the MCP Service so operators can apply tighter
+#    NetworkPolicy on the admin port (kubelet + cluster ops only).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Headless Service — stable per-pod DNS.
+apiVersion: v1
+kind: Service
+metadata:
+  name: arcgraph-headless
+  namespace: arcgraph-prod
+  labels:
+    app: arcgraph
+spec:
+  type: ClusterIP
+  clusterIP: None  # headless
+  selector:
+    app: arcgraph
+  ports:
+    - name: mcp-http
+      port: 8080
+      targetPort: mcp-http
+    - name: admin-http
+      port: 8090
+      targetPort: admin-http
+    # W24-OPS-α R1 fix-up (MED M3): metrics port removed for v1.0-α
+    # because `--stdio-mcp` does not bind a `/metrics` listener. The
+    # port re-appears at M6-08+ when the `--metrics-http` flag and
+    # listener ship.
+    - name: bolt
+      port: 7687
+      targetPort: bolt
+
+---
+
+# Load-balanced MCP Service — only ready pods receive traffic.
+apiVersion: v1
+kind: Service
+metadata:
+  name: arcgraph
+  namespace: arcgraph-prod
+  labels:
+    app: arcgraph
+    role: data-plane
+spec:
+  type: ClusterIP
+  selector:
+    app: arcgraph
+  ports:
+    - name: mcp-http
+      port: 8080
+      targetPort: mcp-http
+    - name: bolt
+      port: 7687
+      targetPort: bolt
+  # `publishNotReadyAddresses: false` (the default) means only ready
+  # pods receive traffic. Explicit here so the contract is visible.
+  publishNotReadyAddresses: false
+
+---
+
+# Admin HTTP Service — separate so NetworkPolicy can apply tighter
+# rules (kubelet probes + cluster ops only).
+apiVersion: v1
+kind: Service
+metadata:
+  name: arcgraph-admin
+  namespace: arcgraph-prod
+  labels:
+    app: arcgraph
+    role: admin
+  annotations:
+    # Document the NetworkPolicy expectation; v1.0-GA does NOT ship a
+    # NetworkPolicy resource (operators may have their own policy
+    # framework), but the annotation flags the intent for the operator
+    # to wire one.
+    "arcgraph.io/network-policy": "kubelet-and-cluster-ops-only"
+spec:
+  type: ClusterIP
+  selector:
+    app: arcgraph
+  ports:
+    - name: admin-http
+      port: 8090
+      targetPort: admin-http
+    # W24-OPS-α R1 fix-up (MED M3): metrics port removed for v1.0-α;
+    # see headless Service note above.
+  # Admin port should publish even not-ready addresses — operators want
+  # to probe /livez on a NOT-ready pod to distinguish wedged from
+  # cold-start.
+  publishNotReadyAddresses: true

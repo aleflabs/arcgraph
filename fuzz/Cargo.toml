@@ -1,0 +1,205 @@
+[package]
+name = "arcgraph-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arcgraph-core = { path = "../crates/arcgraph-core" }
+arcgraph-storage = { path = "../crates/arcgraph-storage" }
+arcgraph-query = { path = "../crates/arcgraph-query" }
+arcgraph-mcp = { path = "../crates/arcgraph-mcp" }
+arcgraph-vector = { path = "../crates/arcgraph-vector" }
+# W28-S604: secondary B-tree on-disk key/entry codecs (secondary_index_fuzz).
+arcgraph-index = { path = "../crates/arcgraph-index" }
+# W28-S604: hand-written Neo4j Cypher-export migration parser
+# (migrate_cypher_fuzz). The `arcgraph-cli` lib exposes
+# `migrate::parse_cypher_export_str`.
+arcgraph-cli = { path = "../crates/arcgraph-cli" }
+serde_json = "1"
+
+# `cargo fuzz build` needs at least one bin target with the `fuzz_target!`
+# macro. We keep the 7 W22-DB-ε targets as `bin` entries plus the
+# historical `placeholder` so external tooling that targets it (e.g.,
+# CI rollups) still compiles.
+
+[[bin]]
+name = "placeholder"
+path = "fuzz_targets/placeholder.rs"
+test = false
+doc = false
+bench = false
+
+# ─── W22-DB-ε: production-surface fuzz targets ────────────────────────
+
+[[bin]]
+name = "arcql_parser_fuzz"
+path = "fuzz_targets/arcql_parser_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_deserializer_fuzz"
+path = "fuzz_targets/wal_deserializer_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rel_record_deser_fuzz"
+path = "fuzz_targets/rel_record_deser_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_record_deser_fuzz"
+path = "fuzz_targets/node_record_deser_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mcp_message_fuzz"
+path = "fuzz_targets/mcp_message_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "property_value_fuzz"
+path = "fuzz_targets/property_value_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "toon_serializer_fuzz"
+path = "fuzz_targets/toon_serializer_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# ─── W26-γ-3 / ADR-136: arcql-smith random Cypher generator fuzz target ───
+
+[[bin]]
+name = "arcql_smith_fuzz"
+path = "fuzz_targets/arcql_smith_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# ─── W28-S4 / testing-strategy §2.4 minimums (PR #510 §1c, ADR-165 M6) ───
+# page-layout parser + Bolt/PackStream wire-format parser fuzz targets.
+
+[[bin]]
+name = "page_layout_fuzz"
+path = "fuzz_targets/page_layout_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bolt_packstream_fuzz"
+path = "fuzz_targets/bolt_packstream_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# ─── W27-ξ / ADR-164: adversarial fuzz expansion ─────────────────────
+# The ArcQL write-op family is hardened via a corpus extension of the
+# existing `arcql_parser_fuzz` target (ADR-164 §D-2), NOT a duplicate
+# target. The MCP raw_query dispatcher is distinct from the JSON-RPC
+# envelope `mcp_message_fuzz` already covers.
+
+[[bin]]
+name = "mcp_raw_query_fuzz"
+path = "fuzz_targets/mcp_raw_query_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# ─── W28-S604: full-canonical-set completeness — newly-filled targets ───
+# Audit (reports/fuzz-w28-s604-completeness-audit.md) found these parsers
+# UNCOVERED by the existing-8 / #499 / #559 sets. Each ships a no-panic
+# contract + round-trip/idempotence (or determinism) oracle per §6.
+
+[[bin]]
+name = "bolt_message_fuzz"
+path = "fuzz_targets/bolt_message_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mcp_yaml_fuzz"
+path = "fuzz_targets/mcp_yaml_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_segment_fuzz"
+path = "fuzz_targets/wal_segment_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secondary_index_fuzz"
+path = "fuzz_targets/secondary_index_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "migrate_cypher_fuzz"
+path = "fuzz_targets/migrate_cypher_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# ─── ADR-191 (#620): Value::Map JSON-decode (network-reachable) ───────
+[[bin]]
+name = "value_map_json_fuzz"
+path = "fuzz_targets/value_map_json_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "catalog_page_fuzz"
+path = "fuzz_targets/catalog_page_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# ─── #1287 (security hardening; #1285 sibling): CommitBundle payload ───
+# decoder fuzz target. `decode_commit_bundle_for_version` parses untrusted
+# on-disk bytes during crash recovery + spill reload (v5..v8 sectioned
+# decoders incl the v8 `acl_grants` tail); no prior fuzz coverage.
+[[bin]]
+name = "commit_bundle_decoder_fuzz"
+path = "fuzz_targets/commit_bundle_decoder_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# ─── M5-D1 (#1457): leg-(c) fresh-load NATIVE input boundary ────────────
+# INV-M5.16 half re-landed with its format (salvaged sound from PR #1504
+# per M5D-REDESIGN-AMENDMENT §9); the Parquet boundary + its fuzz target
+# land together in a later slice. No new deps: `arcgraph-cli` is already a
+# fuzz dependency (migrate_cypher_fuzz).
+[[bin]]
+name = "m5_native_loader_fuzz"
+path = "fuzz_targets/m5_native_loader_fuzz.rs"
+test = false
+doc = false
+bench = false

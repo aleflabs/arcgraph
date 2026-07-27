@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c644c7b4886635734ec4bc783ba94a125af6ddb8de6f067014a14d55fb5c1622 # shrinks to r = SearchResult { k: 1, hits: [SearchHit { node_id: 0, label: None, score: 0.0 }] }

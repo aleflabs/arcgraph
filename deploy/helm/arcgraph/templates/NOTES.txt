@@ -1,0 +1,44 @@
+{{ .Chart.Name }} has been deployed to namespace {{ .Release.Namespace }}.
+
+Release name: {{ .Release.Name }}
+Image:        {{ .Values.image.repository }}:{{ .Values.image.tag }}
+Replicas:     {{ .Values.replicaCount }}
+MCP:          {{ .Values.mcp.transport }}{{ if ne .Values.mcp.transport "stdio" }} on port {{ .Values.mcp.http.port }}{{ end }}
+Admin:        {{ .Values.admin.bind }} (probes: /livez + /readyz; cost: /cost)
+NetworkPolicy: {{ if .Values.networkPolicy.enabled }}enabled{{ else }}DISABLED — admin port reachable from any pod in the cluster{{ end }}
+
+Verify rollout:
+
+  kubectl rollout status statefulset/{{ include "arcgraph.fullname" . }} -n {{ .Release.Namespace }}
+
+Probe the deployment (port-forward the admin Service):
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "arcgraph.fullname" . }}-admin {{ include "arcgraph.adminPort" . }}:{{ include "arcgraph.adminPort" . }} &
+  curl http://127.0.0.1:{{ include "arcgraph.adminPort" . }}/livez
+  curl http://127.0.0.1:{{ include "arcgraph.adminPort" . }}/readyz
+  curl http://127.0.0.1:{{ include "arcgraph.adminPort" . }}/cost
+
+{{- if not .Values.tls.enabled }}
+
+WARNING: TLS is disabled. v1.0-GA production deployments SHOULD enable
+TLS for the MCP transport. To enable:
+
+  1. Create a Secret with tls.crt + tls.key:
+       kubectl create secret tls arcgraph-tls --cert=... --key=... -n {{ .Release.Namespace }}
+  2. Helm upgrade with:
+       helm upgrade {{ .Release.Name }} . --set tls.enabled=true --set tls.secretName=arcgraph-tls
+
+{{- end }}
+
+{{- if not .Values.networkPolicy.enabled }}
+
+WARNING: NetworkPolicy is disabled. Admin endpoints (/livez, /readyz,
+/cost) are reachable from any pod in the cluster. Production deployments
+SHOULD enable NetworkPolicy or wire an equivalent at the cluster's
+ingress controller.
+
+{{- end }}
+
+Documentation:
+  Helm values reference: https://github.com/aleflabs/arcgraph/tree/main/deploy/helm/arcgraph
+  Operations runbooks:   https://github.com/aleflabs/arcgraph/tree/main/docs/operations

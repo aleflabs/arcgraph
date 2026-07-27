@@ -1,0 +1,109 @@
+{
+  "engine": "arcgraph",
+  "total": 20,
+  "passed": 17,
+  "errors": 3,
+  "fails": 0,
+  "results": [
+    {
+      "construct": "match_all",
+      "verdict": "PASS",
+      "detail": "rows=[[10000]]"
+    },
+    {
+      "construct": "create_return",
+      "verdict": "PASS",
+      "detail": "rows=[[1]]"
+    },
+    {
+      "construct": "match_prop_literal",
+      "verdict": "PASS",
+      "detail": "rows=[[1]]"
+    },
+    {
+      "construct": "match_prop_param",
+      "verdict": "PASS",
+      "detail": "ran"
+    },
+    {
+      "construct": "merge_literal",
+      "verdict": "PASS",
+      "detail": "ran"
+    },
+    {
+      "construct": "merge_param",
+      "verdict": "ERROR",
+      "detail": "CypherSyntaxError: {neo4j_code: Neo.ClientError.Statement.SyntaxError} {message: syntax error: type-check error: CREATE property `email` va"
+    },
+    {
+      "construct": "multi_label",
+      "verdict": "ERROR",
+      "detail": "CypherSyntaxError: {neo4j_code: Neo.ClientError.Statement.SyntaxError} {message: syntax error: pest parse error at 1:12-1:12: expected prop"
+    },
+    {
+      "construct": "optional_match",
+      "verdict": "PASS",
+      "detail": "ran"
+    },
+    {
+      "construct": "unwind_create",
+      "verdict": "PASS",
+      "detail": "rows=[[3]]"
+    },
+    {
+      "construct": "with_pipe",
+      "verdict": "PASS",
+      "detail": "rows=[[1]]"
+    },
+    {
+      "construct": "aggregation",
+      "verdict": "PASS",
+      "detail": "rows=[[1, 1.0, 1]]"
+    },
+    {
+      "construct": "order_by",
+      "verdict": "PASS",
+      "detail": "ran"
+    },
+    {
+      "construct": "skip_limit",
+      "verdict": "PASS",
+      "detail": "ran"
+    },
+    {
+      "construct": "return_as_alias",
+      "verdict": "PASS",
+      "detail": "rows=[[1]]"
+    },
+    {
+      "construct": "map_subscript",
+      "verdict": "PASS",
+      "detail": "ran"
+    },
+    {
+      "construct": "list_literal",
+      "verdict": "PASS",
+      "detail": "ran"
+    },
+    {
+      "construct": "exists_subquery",
+      "verdict": "ERROR",
+      "detail": "CypherSyntaxError: {neo4j_code: Neo.ClientError.Statement.SyntaxError} {message: syntax error: pest parse error at 1:32-1:32: expected map_"
+    },
+    {
+      "construct": "var_length_path",
+      "verdict": "PASS",
+      "detail": "ran"
+    },
+    {
+      "construct": "path_pattern",
+      "verdict": "PASS",
+      "detail": "ran"
+    },
+    {
+      "construct": "count_star",
+      "verdict": "PASS",
+      "detail": "rows=[[3]]"
+    }
+  ]
+}

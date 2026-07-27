@@ -1,0 +1,227 @@
+{
+  "_comment": "W25-OPS-PROD / ADR-093-amendment-01 §D-1 — Per-tenant query latency P50/P95/P99. Datasource = Prometheus (auto-provisioned by deploy/grafana/provisioning/datasources/prometheus.yml). Metric source = arcgraph M6-06 Prometheus text-format exporter (forward-bound to M6-08 metrics HTTP). Histograms exported as arcgraph_query_duration_seconds_bucket{tenant_id=\"<id>\",method=\"<mcp method>\"}.",
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "ArcGraph per-tenant MCP query latency (P50/P95/P99) sliced by method. Source histogram: arcgraph_query_duration_seconds_bucket. ADR-093-amendment-01 §D-1 dashboard 1 of 5.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "P50 query latency per tenant, sliced by MCP method. Production-target: P50 < 50ms per design-v2 §10.5.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "", "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "spanNulls": false},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.05}, {"color": "red", "value": 0.1}]},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le, tenant_id, method) (rate(arcgraph_query_duration_seconds_bucket{tenant_id=~\"$tenant\",method=~\"$method\"}[5m])))",
+          "legendFormat": "{{tenant_id}} / {{method}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "P50 query latency (per tenant × method)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "P95 query latency per tenant, sliced by MCP method. Production-target: P95 < 200ms per design-v2 §10.5.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "", "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "spanNulls": false},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.2}, {"color": "red", "value": 0.5}]},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, tenant_id, method) (rate(arcgraph_query_duration_seconds_bucket{tenant_id=~\"$tenant\",method=~\"$method\"}[5m])))",
+          "legendFormat": "{{tenant_id}} / {{method}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "P95 query latency (per tenant × method)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "P99 query latency per tenant, sliced by MCP method. Production-target: P99 < 1s per design-v2 §10.5 — sustained breaches indicate hot-tenant noise or planner regression.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "", "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "spanNulls": false},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1.0}, {"color": "red", "value": 2.0}]},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+      "id": 3,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le, tenant_id, method) (rate(arcgraph_query_duration_seconds_bucket{tenant_id=~\"$tenant\",method=~\"$method\"}[5m])))",
+          "legendFormat": "{{tenant_id}} / {{method}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "P99 query latency (per tenant × method)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Request rate per tenant. Cross-reference with latency panels: a spike in rate concurrent with a spike in P99 suggests a tenant pushing the planner past cache warm-up.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "spanNulls": false},
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 4,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (tenant_id, method) (rate(arcgraph_query_duration_seconds_count{tenant_id=~\"$tenant\",method=~\"$method\"}[5m]))",
+          "legendFormat": "{{tenant_id}} / {{method}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Request rate (per tenant × method)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Error rate per tenant (MCPError responses / total requests). Sustained >1% indicates either tenant-side bug (malformed inputs) or server-side regression.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "spanNulls": false},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.01}, {"color": "red", "value": 0.05}]},
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 5,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (tenant_id, method) (rate(arcgraph_query_errors_total{tenant_id=~\"$tenant\",method=~\"$method\"}[5m])) / sum by (tenant_id, method) (rate(arcgraph_query_duration_seconds_count{tenant_id=~\"$tenant\",method=~\"$method\"}[5m]))",
+          "legendFormat": "{{tenant_id}} / {{method}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Error rate (per tenant × method)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["arcgraph", "v1.0-ga", "query-latency"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "definition": "label_values(arcgraph_query_duration_seconds_count, tenant_id)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Tenant",
+        "multi": true,
+        "name": "tenant",
+        "options": [],
+        "query": {"query": "label_values(arcgraph_query_duration_seconds_count, tenant_id)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {"selected": false, "text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "definition": "label_values(arcgraph_query_duration_seconds_count, method)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "MCP method",
+        "multi": true,
+        "name": "method",
+        "options": [],
+        "query": {"query": "label_values(arcgraph_query_duration_seconds_count, method)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-3h", "to": "now"},
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "ArcGraph — Query latency (per tenant)",
+  "uid": "arcgraph-query-latency",
+  "version": 1,
+  "weekStart": ""
+}

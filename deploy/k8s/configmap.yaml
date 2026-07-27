@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ArcGraph ConfigMap — W24-OPS-α / ADR-093 §D-5.
+#
+# Operator-overridable env vars consumed by the StatefulSet's
+# `envFrom: configMapRef:` reference. Apply this BEFORE the
+# StatefulSet so the pods come up with the correct config.
+#
+# To override: edit + `kubectl apply -f configmap.yaml` + `kubectl
+# rollout restart statefulset/arcgraph -n arcgraph-prod`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arcgraph-config
+  namespace: arcgraph-prod
+  labels:
+    app: arcgraph
+data:
+  # ── Tracing (ADR-093 §D-2) ─────────────────────────────────────────
+
+  # Per-target log filter. Default = warn for transitive deps,
+  # info for arcgraph_* targets.
+  RUST_LOG: "warn,arcgraph=info,arcgraph_cli=info,arcgraph_mcp=info,arcgraph_storage=info,arcgraph_query=info"
+
+  # OTLP-gRPC endpoint. Unset / empty = OTLP disabled (stderr-only).
+  # Set to your OpenTelemetry Collector's gRPC endpoint to enable
+  # trace export.
+  # ARCGRAPH_OTLP_ENDPOINT: "http://otel-collector.observability.svc:4317"
+
+  # OTel service.name resource attribute.
+  ARCGRAPH_OTLP_SERVICE_NAME: "arcgraph-v1ga"
+
+  # gRPC export timeout (ms).
+  ARCGRAPH_OTLP_TIMEOUT_MS: "5000"
+
+  # ── Rust runtime ───────────────────────────────────────────────────
+
+  # Per ADR-002 thread-per-core: align Tokio worker count with the
+  # pod's CPU limit (Kubernetes downward-API would let us inject the
+  # exact CPU request; for now the ConfigMap pins it explicitly).
+  # Operators with `cpu: 2` limits should set this to 2.
+  TOKIO_WORKER_THREADS: "2"
+
+  # ── Build / version (operator-visible) ─────────────────────────────
+
+  # Stamped at deploy time; operators may inject via templating
+  # (`helm template` / `kustomize`) instead of editing here.
+  ARCGRAPH_DEPLOY_VERSION: "v1.0-alpha"

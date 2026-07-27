@@ -1,0 +1,129 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Security audit workflow — W19β #325.
+#
+# Closes the W15 IR carry-debt for "cargo audit + cargo deny in CI"
+# (issue #325). Complements the existing per-PR `deny` job in
+# `.github/workflows/ci.yml` by:
+#
+#   • running `cargo audit` (RustSec advisory DB) on every PR that
+#     touches dep manifests and on a weekly schedule (to catch
+#     advisories disclosed against a frozen `Cargo.lock`),
+#   • re-running `cargo deny check` on the weekly cron so license /
+#     ban / source / advisory regressions are caught even when no PR
+#     touches deps in a given week,
+#   • surfacing all three classes (advisories, licenses, bans) under
+#     a single workflow surface that release-managers can pin to.
+#
+# Per the contributor contract: AGPL / GPL / SSPL / BUSL deps are
+# unconditionally banned; the `deny.toml` `allow` list is the single
+# source of truth. A scratch-branch fault-injection smoke (adding an
+# AGPL dep) is documented in `docs/security/dep-audit.md` §5.
+#
+# Per `feedback_load_bearing_pr_requires_fault_injection_tests.md`:
+# the failure-path test for this workflow IS the documented scratch-
+# branch recipe — CI itself doesn't synthesize a fake CVE because the
+# RustSec DB is the trust root.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: security-audit
+
+on:
+  # Weekly cron — Mondays 06:00 UTC.
+  schedule:
+    - cron: '0 6 * * 1'
+
+  # Per-PR run when dep manifests change. The advisory DB itself
+  # doesn't change in lockstep with deps, but a `Cargo.lock` bump
+  # IS the moment to re-verify the current set against the DB.
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/*/Cargo.toml'
+      - 'deny.toml'
+      - '.github/workflows/security-audit.yml'
+
+  # On-demand for release-managers + ad-hoc disclosure response.
+  workflow_dispatch: {}
+
+# Cancel in-flight per-PR runs on subsequent pushes — the weekly cron
+# is on `schedule` events which use a different group below.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  # `issues: write` is required by the rustsec/audit-check action, which
+  # auto-files a tracking GitHub issue on any advisory match (including
+  # `unsound`/informational warnings). Without it the action's POST /issues
+  # call fails `Resource not accessible by integration`, reddening the gate
+  # even when 0 VULNS are found. Belt-and-suspenders: kept present so a future
+  # informational warning (which fires the issue-create path) does not re-red
+  # the gate after the current memmap2 RUSTSEC-2026-0186 warning is cleared.
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────
+  # cargo-audit — RustSec advisory DB check.
+  # ────────────────────────────────────────────────────────────────────
+  # cargo-audit consults the RustSec advisory DB
+  # (https://rustsec.org/advisories/) and exits non-zero on any
+  # advisory whose `affected.crates` matches the workspace's
+  # `Cargo.lock`. We do NOT severity-filter at v1.0-alpha: there's
+  # no operational case for shipping with a known vulnerability,
+  # and the weekly cron's purpose IS to catch the
+  # disclose-against-frozen-lockfile case. (Severity-based gating
+  # is a future improvement tracked in docs/security/dep-audit.md
+  # §6.)
+  #
+  # Opt-out for a specific advisory (e.g., an unfixable transitive
+  # dep where upstream is unresponsive) goes in `.cargo/audit.toml`
+  # `ignore = ["RUSTSEC-XXXX-XXXX"]` with a comment naming the
+  # justification + the issue tracking the upstream fix. The opt-out
+  # surface deliberately lives outside `deny.toml` because audit
+  # ignores are about disclosure-response, not policy.
+  audit:
+    name: cargo audit (RustSec advisory DB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: security-audit
+
+      # The official rustsec/audit-check Action pulls the latest DB
+      # fresh on every run (versus a stale-cache `cargo install
+      # cargo-audit`), so disclosures are visible the same Monday the
+      # cron fires.
+      - name: Run cargo audit
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ────────────────────────────────────────────────────────────────────
+  # cargo-deny — license + advisory + ban + source enforcement.
+  # ────────────────────────────────────────────────────────────────────
+  # Same `cargo deny check` invocation as `.github/workflows/ci.yml`
+  # `deny` job; replicated here so the weekly cron exercises the
+  # license gate even when no PR touches `deny.toml` or `Cargo.lock`.
+  # This is the AGPL/GPL/SSPL gate.
+  deny:
+    name: cargo deny (license + advisory + ban + source)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # `check` (no subcommand) runs all four: advisories,
+          # bans, licenses, sources. The default DB versions are
+          # pinned via the upstream Action's release; bumps are
+          # reviewed in lockstep with `deny.toml` edits.
+          command: check

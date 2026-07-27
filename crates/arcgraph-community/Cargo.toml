@@ -1,0 +1,38 @@
+[package]
+name = "arcgraph-community"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Community detection (GVE-Leiden static + DF Leiden incremental — incremental in M3.d-2) for ArcGraph: per-tenant Leiden hierarchy + B-tree membership index."
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+arcgraph-core.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+# Criterion bench for the B-tree membership index per ADR-040 §D-9.
+# Validates the <200 ns P50 lookup budget and the
+# O(community_size) members() scan.
+[[bench]]
+name = "membership_lookup"
+harness = false
+
+# Criterion bench for static GVE-Leiden per ADR-040 §D-1 + §D-9.
+# Three sub-benches: Zachary (34n / 78e), SBM-1K (~25 K edges),
+# SBM-10K (~500 K edges).
+[[bench]]
+name = "leiden_static"
+harness = false

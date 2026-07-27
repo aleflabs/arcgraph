@@ -1,0 +1,49 @@
+[package]
+name = "arcgraph-graph-traversal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Canonical bounded graph traversal for ArcGraph (V11-S-04 / ADR-205): k-hop with cost budgets + degree-aware reservoir sampling, bidirectional shortest path, Yen's k-shortest loopless paths, local top-K merge, degree — behind the EdgeSource adapter seam."
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+# `NodeId` / `RelId` / `TypeId` shared ID newtypes per
+# `arcgraph-core::ids` canonicalization. This crate touches no
+# storage / I/O / LSN surfaces; tenancy + MVCC visibility are the
+# ADAPTER's concern (ADR-205 §D-1) — the adapter closes over
+# `(tenant, snapshot_lsn)` exactly as PRIM-1's `collect_reachable`
+# arguments did.
+arcgraph-core.workspace = true
+# `thiserror` for `TraversalError`; `#[non_exhaustive]` per the
+# workspace error-enum convention (code-quality policy). Translated at the
+# consumer boundary per `docs/codec-error-translation.md`.
+thiserror.workspace = true
+# `tracing::debug!` structured fields on traversal entry points
+# (code-quality policy — no `println!` in library code).
+tracing.workspace = true
+
+[dev-dependencies]
+# `proptest` for the traversal invariants (ADR-205 §tests):
+# (a) k_hop BFS depths == reference single-source BFS depths;
+# (b) bidirectional_shortest length == unidirectional BFS distance;
+# (c) Yen: sorted, loopless, pairwise-distinct, first == shortest;
+# (d) reservoir: deterministic under fixed seed; capacity respected.
+proptest.workspace = true
+# `criterion` for the V11-S-04 exit-criterion bench
+# (`docs/roadmap.md` V11-S-04 row): k=3 LIMIT=1000 on a 1M-node
+# fixture, P95 <= 100 ms.
+criterion.workspace = true
+
+# Criterion bench harness for the V11-S-04 exit criterion. 1M-node
+# synthetic bounded-degree fixture via `MemoryEdgeSource`; measures
+# `GraphTraversalHandle::k_hop` k=3 LIMIT=1000 (BFS + ReservoirVitterL
+# variants). Under the testing strategy ("Every public performance-sensitive API
+# has a benchmark").
+[[bench]]
+name = "k_hop_1m"
+harness = false

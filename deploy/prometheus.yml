@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ArcGraph local-dev Prometheus configuration (W15β M6-03 / docker-compose).
+#
+# Mounted as `/etc/prometheus/prometheus.yml` inside the `prometheus`
+# container when the prometheus/grafana stanzas in `docker-compose.yml`
+# are uncommented. Minimal scrape config covering the M6-06 `/metrics`
+# endpoint shipped by `arcgraph-mcp`'s HTTP transport (design-v2 §10.2;
+# scrape endpoint on port 9090 by default).
+#
+# Not a production config — production deployments use
+# Kubernetes-managed Prometheus or VictoriaMetrics with PD-1-compatible
+# retention/HA policies. This file is intentionally minimal so a future
+# `docker compose up` doesn't fail on the bind-mount source-path check
+# when an operator uncomments the prometheus stanza.
+# ─────────────────────────────────────────────────────────────────────────────
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: arcgraph
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          # `arcgraph` is the docker-compose service name; container DNS
+          # resolves it within the `arcgraph-net` bridge network.
+          - arcgraph:9090

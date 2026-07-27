@@ -1,0 +1,1602 @@
+// ArcQL grammar — pest PEG, ADR-038 §2 D-1..D-10 surface.
+//
+// VERSION GUARD
+//   This grammar exposes only syntax backed by the bare database
+//   engine. Commercial and reserved model-specific syntax is absent.
+//
+// AMBIGUITY AUDIT (ADR-038 OQ-38-5)
+//   - `MATCH` keyword vs. `MATCH` operator: clause-`MATCH` only
+//     matches at statement position via `clause`; the
+//     `text_match_op` operator only matches inside `where_expr`
+//     where the keyword `MATCH` would not start a clause.
+//   - openCypher `*1..3` vs. GQL `{1,3}`: both length-range shapes
+//     are accepted (D-9 reserves the GQL form at v1.0); `*` and
+//     `{` cannot start the same nonterminal so PEG ordered choice
+//     resolves trivially.
+//   - GQL quantifier `{1,3}` vs. property-map literal `{key: val}`:
+//     the quantifier appears only after a relationship type spec
+//     inside `[]`; property maps appear after a label/type spec
+//     inside `()` / `[]` and require an identifier-then-colon;
+//     ordered choice in the rel/node patterns puts quantifier
+//     first when it could match.
+//   - `RANK BY HYBRID` vs. `ORDER BY`: distinct keyword sequences,
+//     no PEG conflict.
+//   - **Keyword-prefix bleed (the load-bearing one).** PEG's `^"…"`
+//     is a literal-prefix matcher with NO word-boundary
+//     check — `^"OR"` will happily consume `OR` from `ORDER`,
+//     leaving `DER BY n` for the rest of the grammar to choke on.
+//     Same hazard for AND/AT/AS/IS/IN/BY/TO/OF/NEAR/NOT — every
+//     short keyword that is a prefix of either a longer keyword
+//     or an identifier-shaped string. Mitigation: every keyword
+//     reference in this grammar is wrapped via the `kw_…`
+//     productions below (or by a trailing `~ kw_end` boundary on
+//     bare `^"…"` literals where the explicit form is clearer).
+//   - Reserved keywords (MATCH, RETURN, WHERE, etc.) must NOT be
+//     parsed as identifiers — see the `keyword` exclusion in
+//     `identifier`.
+
+// =====================================================================
+// 1. Whitespace, comments, and the keyword-boundary helper
+// =====================================================================
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ line_comment | block_comment }
+line_comment  = _{ ("//" | "--") ~ (!NEWLINE ~ ANY)* }
+block_comment = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+// `kw_end` is the boundary assertion appended to every keyword
+// reference. Without this, `^"OR"` would consume the `OR` prefix
+// of `ORDER` and break clause sequencing. The body is a
+// zero-width negative lookahead (`!(...)`); pest evaluates the
+// inner predicate WITHOUT consuming input, but inside a top-level
+// silent rule pest expects a non-empty match. We give it a
+// non-consuming &-style construct via the explicit `&` in pest
+// idiom (`&` is "and-predicate"; the closest pest equivalent is a
+// double negative). The simplest guaranteed form is to inline
+// the negative lookahead at every `kw_…` site instead of
+// extracting a helper rule. We keep the helper as a silent
+// boundary and inline it where needed.
+//
+// pest 2.x note: `_{ !(...) }` works as a zero-width assertion;
+// the silent-rule machinery keeps it out of the AST. Validated
+// against pest 2.8.6 via the parser_smoke proof.
+kw_end = _{ !( ASCII_ALPHANUMERIC | "_" ) }
+
+// One-shot helpers per keyword — these wrap `^"…"` with the
+// boundary assertion. Adding a new keyword to the language means
+// adding a `kw_…` rule here AND adding the bareword to the
+// `keyword` production further down (so it is excluded from
+// identifier matches).
+//
+// Convention: silent rules (`_{}`) so they don't pollute the AST
+// pair tree.
+kw_match            = @{ ^"MATCH"            ~ kw_end }
+kw_optional         = @{ ^"OPTIONAL"         ~ kw_end }
+kw_where            = @{ ^"WHERE"            ~ kw_end }
+kw_return           = @{ ^"RETURN"           ~ kw_end }
+kw_with             = @{ ^"WITH"             ~ kw_end }
+kw_unwind           = @{ ^"UNWIND"           ~ kw_end }
+// ADR-192 (#623) — `CALL { … }` brace-subquery (Cypher 25, a
+// beyond-openCypher-v9 capability extension). The `{` after `CALL`
+// distinguishes the SUBQUERY form from a procedure-call `CALL proc()`.
+// ADR-197 (#802) adds the procedure-call form `CALL qualified.name(args)
+// [YIELD …]` for schema-introspection procedures (apoc.meta.data,
+// db.labels, …) the langchain-neo4j driver sends on connect;
+// `call_clause` requires `{` and `call_procedure_clause` requires a
+// dotted name + `(`, so the two forms never overlap.
+kw_call             = @{ ^"CALL"             ~ kw_end }
+kw_yield            = @{ ^"YIELD"            ~ kw_end }
+kw_show             = @{ ^"SHOW"             ~ kw_end }
+kw_as               = @{ ^"AS"               ~ kw_end }
+kw_distinct         = @{ ^"DISTINCT"         ~ kw_end }
+kw_order            = @{ ^"ORDER"            ~ kw_end }
+kw_by               = @{ ^"BY"               ~ kw_end }
+kw_asc              = @{ ^"ASC"              ~ kw_end }
+kw_desc             = @{ ^"DESC"             ~ kw_end }
+kw_limit            = @{ ^"LIMIT"            ~ kw_end }
+kw_skip             = @{ ^"SKIP"             ~ kw_end }
+kw_and              = @{ ^"AND"              ~ kw_end }
+kw_or               = @{ ^"OR"               ~ kw_end }
+// XOR — openCypher v9 boolean exclusive-disjunction (#621). Same
+// `^"…" ~ kw_end` boundary discipline as AND/OR: without `kw_end`,
+// `^"XOR"` would consume the `XOR` prefix of an identifier-shaped
+// string. `XOR` is NOT a prefix of any longer keyword (unlike
+// `OR`⊂`ORDER`), but the boundary keeps it from mis-matching an
+// identifier like `xoradical` and is required for parity with the
+// AND/OR pattern this operator parallels.
+kw_xor              = @{ ^"XOR"              ~ kw_end }
+kw_not              = @{ ^"NOT"              ~ kw_end }
+kw_in               = @{ ^"IN"               ~ kw_end }
+kw_is               = @{ ^"IS"               ~ kw_end }
+kw_null             = @{ ^"NULL"             ~ kw_end }
+kw_true             = @{ ^"TRUE"             ~ kw_end }
+kw_false            = @{ ^"FALSE"            ~ kw_end }
+kw_for              = @{ ^"FOR"              ~ kw_end }
+kw_all              = @{ ^"ALL"              ~ kw_end }
+// ADR-188 — openCypher v9 §3 list-predicate quantifiers
+// (`any`/`none`/`single`) + the `reduce` list-reduction. `kw_all`
+// (above) is SHARED with UNION ALL — the `(` lookahead in
+// `filter_expr` disambiguates `all(...)` (predicate) from
+// `… UNION ALL …` (set-op). These wrappers are case-insensitive
+// (`^"…"`) so `any(...)` / `ANY(...)` both parse; they are NOT added
+// to the `keyword` identifier-exclusion set (which is case-sensitive
+// UPPERCASE) so lowercase property names `n.any` / `n.none` /
+// `n.single` / `n.reduce` keep parsing as property accesses. The
+// productions occupy `primary_atom` BEFORE `function_call`, so the
+// names are only "reserved" in the positions those productions occupy
+// (ADR-188 Consequences — small openCypher-aligned surface cost).
+kw_any              = @{ ^"ANY"              ~ kw_end }
+kw_none             = @{ ^"NONE"             ~ kw_end }
+kw_single           = @{ ^"SINGLE"           ~ kw_end }
+kw_reduce           = @{ ^"REDUCE"           ~ kw_end }
+kw_near             = @{ ^"NEAR"             ~ kw_end }
+// openCypher v9 §3.3.6 string-comparison operator keywords (#773; TCK
+// `expressions/string/String8`-`11` + `expressions/precedence/Precedence4`
+// [4]). `STARTS WITH` / `ENDS WITH` are two-keyword operators (the second
+// keyword reuses `kw_with`); `CONTAINS` is one keyword. They sit at the
+// comparison-precedence tier (parsed as `special_pred` suffixes, like
+// `IN` / `IS NULL`). The `kw_end` boundary stops `STARTS`/`ENDS`/`CONTAINS`
+// from bleeding into a longer identifier — `n.startsWith` / a bareword
+// `contains` stay single identifiers (kw_end fails on the next alnum char).
+kw_starts           = @{ ^"STARTS"           ~ kw_end }
+kw_ends             = @{ ^"ENDS"             ~ kw_end }
+kw_contains         = @{ ^"CONTAINS"         ~ kw_end }
+kw_vector_index     = @{ ^"VECTOR_INDEX"     ~ kw_end }
+kw_community        = @{ ^"COMMUNITY"        ~ kw_end }
+kw_rank             = @{ ^"RANK"             ~ kw_end }
+kw_hybrid           = @{ ^"HYBRID"           ~ kw_end }
+kw_vector           = @{ ^"VECTOR"           ~ kw_end }
+kw_text             = @{ ^"TEXT"             ~ kw_end }
+kw_fusion           = @{ ^"FUSION"           ~ kw_end }
+kw_rrf              = @{ ^"RRF"              ~ kw_end }
+kw_shortest_path    = @{ ^"SHORTEST_PATH"    ~ kw_end }
+// ADR-194 D-1 — canonical openCypher camelCase spellings. `shortestPath`
+// is the canonical alias for the `SHORTEST_PATH` macro (D-3: two spellings,
+// ONE single-shortest algorithm — both flow into `shortest_path_pattern`).
+// `allShortestPaths` is the net-new all-equal-min-length variant. The
+// case-insensitive `^` matches openCypher's case-insensitive function
+// names; the no-underscore camelCase forms are DISJOINT from the
+// underscored macro (`^"SHORTEST_PATH"` requires `_` at index 8).
+kw_shortest_path_camel = @{ ^"shortestPath"     ~ kw_end }
+kw_all_shortest_path   = @{ ^"allShortestPaths" ~ kw_end }
+kw_index            = @{ ^"INDEX"            ~ kw_end }
+kw_on               = @{ ^"ON"               ~ kw_end }
+kw_k                = @{ ^"k"                ~ kw_end }
+kw_K_upper          = @{ ^"K"                ~ kw_end }
+
+// `EXPLAIN <query>` / `PROFILE <query>` per ADR-038 §2 D-19 +
+// amendment-03 §TIER-1 GAP B (M4-91). Both prefix a full
+// ArcQL read query; the parser admits both at v1.0 (M4-91 lits
+// EXPLAIN, the executor side of PROFILE defers to M4-71 / M4-61).
+kw_explain          = @{ ^"EXPLAIN"          ~ kw_end }
+kw_profile          = @{ ^"PROFILE"          ~ kw_end }
+
+// `CREATE …` write-op clause per ADR-147 (W26-θ Phase 1 — CREATE
+// node only at this slice; CREATE rel forward-pinned to Phase 2).
+// openCypher v9 §6 "Updating Clauses".
+kw_create           = @{ ^"CREATE"           ~ kw_end }
+
+// Neo4j-compatible index DDL + `SHOW VECTOR INDEXES` keywords (#830,
+// ADR-198 §OQ-7). Deliberately NOT added to the `keyword` exclusion
+// rule below: reserved ONLY at their specific DDL / SHOW grammar
+// positions, so `n.drop` / `n.if` / `n.exists` / `n.options` lowercase
+// property names stay admissible (same case-sensitive discipline as
+// the rest of the keyword table).
+kw_drop             = @{ ^"DROP"             ~ kw_end }
+kw_if               = @{ ^"IF"               ~ kw_end }
+kw_exists           = @{ ^"EXISTS"           ~ kw_end }
+kw_options          = @{ ^"OPTIONS"          ~ kw_end }
+kw_indexes          = @{ ^"INDEXES"          ~ kw_end }
+
+// `DELETE …` / `DETACH DELETE …` write-op clauses per ADR-149
+// (W26-θ Phase 3). openCypher v9 §6 "Updating Clauses".
+// `DETACH` is the modifier that admits deleting a node with attached
+// rels (the rels are tombstoned FIRST; without `DETACH`, the
+// executor surfaces a runtime "relationships attached" error per
+// ADR-149 §D-1).
+kw_delete           = @{ ^"DELETE"           ~ kw_end }
+kw_detach           = @{ ^"DETACH"           ~ kw_end }
+
+// `SET …` / `REMOVE …` write-op clauses per ADR-150 (W26-θ Phase 4).
+// openCypher v9 §6 "Updating Clauses". SET writes properties and
+// labels; REMOVE clears properties and labels. The Phase 4 narrowing
+// admits 4 SET-item shapes (assign / merge / replace / label-add) and
+// 2 REMOVE-item shapes (property / label-remove).
+kw_set              = @{ ^"SET"              ~ kw_end }
+kw_remove           = @{ ^"REMOVE"           ~ kw_end }
+
+// `MERGE …` write-op clause per ADR-151 (W26-θ Phase 5). openCypher
+// v9 §6 "MERGE": match-or-create. The merge pattern reuses Phase 1
+// + Phase 2 `create_node` / `create_path` source-text shapes; the
+// optional `ON CREATE SET …` / `ON MATCH SET …` action clauses reuse
+// Phase 4 `set_clause` bodies. `kw_on` (line 135) is already declared
+// for `DEFINE INDEX … ON …`; we reuse it without adding a new keyword.
+kw_merge            = @{ ^"MERGE"            ~ kw_end }
+
+// `UNION` / `UNION ALL` set-operation keyword per ADR-185 (#649-A1,
+// W28) — openCypher v9 §8 "Set operations". `kw_all` (line ~110) is
+// already declared (reused for `UNION ALL` and list predicates); we
+// add only `kw_union` here AND `"UNION"` to
+// the `keyword` exclusion set below (so `n.union` lowercase property
+// names still parse while the uppercase `UNION` clause keyword is
+// reserved at identifier position — the case-sensitive-exclusion
+// convention established for MATCH/CREATE/etc.).
+kw_union            = @{ ^"UNION"            ~ kw_end }
+
+// Ordinary date/time, duration, and decimal literal constructor
+// keywords. The keywords are CASE-INSENSITIVE
+// per the rest of the grammar; we keep them out of the `keyword`
+// exclusion list (below) so property names like `n.datetime` /
+// `n.duration` continue to parse as property accesses.
+kw_datetime         = @{ ^"DATETIME"         ~ kw_end }
+kw_localdatetime    = @{ ^"LOCALDATETIME"    ~ kw_end }
+kw_date_lit         = @{ ^"DATE"             ~ kw_end }
+kw_duration_lit     = @{ ^"DURATION"         ~ kw_end }
+kw_decimal_lit      = @{ ^"DECIMAL"          ~ kw_end }
+
+// CASE expression (openCypher v9 §3.6; #621). Both the SIMPLE form
+// (`CASE x WHEN v THEN r ... END`) and the SEARCHED form
+// (`CASE WHEN cond THEN r ... END`) share the `case_expr` production in
+// `primary_atom`. Same `^"…" ~ kw_end` boundary discipline as every
+// other keyword (without `kw_end`, `^"CASE"` would consume the `CASE`
+// prefix of an identifier-shaped string and `^"END"` the `END` prefix).
+//
+// SOFT-KEYWORD posture (parallel to `kw_any`/`kw_none`/`kw_single`/
+// `kw_reduce` — the other multi-keyword `primary_atom` constructs): these
+// five are NOT added to the `keyword` identifier-exclusion set, so a
+// property / variable named `case` / `when` / `then` / `else` / `end`
+// keeps parsing as an identifier (PEG backtracks off `case_expr` when the
+// WHEN/THEN skeleton is absent). They are only "reserved" in the
+// positions the `case_expr` production occupies.
+//
+// THE `END` CLOSER IS NAMED `kw_case_end`, NOT `kw_end`: the silent
+// `kw_end` rule (line ~69) is the zero-width keyword-BOUNDARY assertion
+// appended to every keyword — a DIFFERENT thing from the `END` keyword
+// that closes a CASE. Naming the closer `kw_case_end` avoids the clash.
+kw_case             = @{ ^"CASE"             ~ kw_end }
+kw_when             = @{ ^"WHEN"             ~ kw_end }
+kw_then             = @{ ^"THEN"             ~ kw_end }
+kw_else             = @{ ^"ELSE"             ~ kw_end }
+kw_case_end         = @{ ^"END"              ~ kw_end }
+
+// =====================================================================
+// 2. Top-level entry
+// =====================================================================
+
+// Single-statement entry — backward-compat for `parse()`. Admits a
+// trailing `;` (so `MATCH (n) RETURN n;` works) but rejects a chain.
+// Multi-statement queries route through `multi_query` below per ADR-038
+// §5.4.1 closure (M4-83).
+query = { SOI ~ statement ~ ";"? ~ EOI }
+
+// Multi-statement entry — M4-83 (ADR-038 §5.4.1 closure). Admits ≥1
+// statement separated by `;` with an optional trailing `;`. Single-
+// statement input is admissible (a degenerate chain) so the
+// `parse_multi()` entry point handles both shapes uniformly; callers
+// that require N≥2 enforce on the returned Vec length.
+//
+// Per ADR-038 amendment-03 §TIER-1 GAP E rule 2, all statements in a
+// multi-statement query share a single snapshot LSN — that semantic
+// load lives on `executor::execute_multi_statement`, NOT here. The
+// grammar's only job is to admit the chain.
+multi_query = { SOI ~ statement ~ (";" ~ statement)* ~ ";"? ~ EOI }
+
+statement = {
+      explain_query      // EXPLAIN <read_query>           (M4-91; ADR-038 §2 D-19)
+    | profile_query      // PROFILE <read_query>           (M4-91; ADR-038 §2 D-19; lit at executor M4-71)
+    | ddl_statement      // CREATE/DROP INDEX
+    | union_query        // <body> UNION [ALL] <body> …    (ADR-185 §8; MUST precede bare read_query)
+    | read_query         // MATCH … RETURN, with WITH/UNWIND/RANK BY/etc.
+}
+
+// ----- UNION / UNION ALL (ADR-185 §8 — openCypher v9 §8 Set ops) ----
+//
+// `union_query` admits ≥1 `UNION` / `UNION ALL` boundary between
+// **tail-free** query bodies, with a SINGLE post-union `union_tail`
+// (ORDER BY / SKIP / LIMIT) bound to the WHOLE union — NOT the last
+// arm. This is the RC-2 fix (PE verdict §FROZEN CONTRACT item 1): on
+// the v1.0 grammar ORDER BY / SKIP / LIMIT are `tail_*_clause`s folded
+// into the last RETURN by the analyzer, so a naïve
+// `read_query (UNION read_query)+` wrapper would bind a trailing
+// `ORDER BY` to the LAST arm only — violating §8 (the tail orders the
+// COMBINED result). We factor the union arms to a tail-free
+// `union_body` (= `core_clause+`) and lift the tail out to
+// `union_tail`.
+//
+// `union_query` MUST be routed above bare `read_query` in `statement`:
+// a query with no UNION fails the `(kw_union …)+` repetition and PEG
+// backtracks to `read_query` (which re-admits the tail clauses). The
+// per-boundary `kw_all?` records whether each boundary is `UNION ALL`
+// (keep dupes) or `UNION` (distinct); openCypher v9 §8 forbids MIXING
+// the two within one union (TCK `Union3` → `InvalidClauseComposition`)
+// — that all-flags-must-agree rule is enforced at bind time
+// (`BindingError::UnionMixedSetOps`), not in the grammar. Left-assoc
+// fold happens in the AST (`parser.rs`).
+union_query = { union_body ~ (kw_union ~ kw_all? ~ union_body)+ ~ union_tail? }
+
+// A union arm: one or more NON-TAIL clauses. Reuses `core_clause`
+// (the `clause` body MINUS the standalone `tail_order_by_clause` /
+// `tail_skip_clause` / `tail_limit_clause` arms) so the ORDER BY /
+// SKIP / LIMIT tail cannot attach inside an arm.
+union_body = { core_clause+ }
+
+// Post-union tail: ORDER BY / SKIP / LIMIT in canonical order, bound
+// to the whole union. At least one must be present for the optional
+// `union_tail?` to match (an absent tail is the `?`-elided case).
+union_tail = {
+      order_by ~ skip? ~ limit?
+    | skip ~ limit?
+    | limit
+}
+
+// EXPLAIN / PROFILE prefix a full ArcQL read query. Index DDL is not
+// admitted.
+//
+// Nested EXPLAIN / PROFILE (e.g. `EXPLAIN PROFILE MATCH ...`) is
+// rejected at the grammar level: the inner of these rules is bare
+// `read_query`, not a full `statement`, so the chain cannot recurse.
+explain_query = { kw_explain ~ read_query }
+profile_query = { kw_profile ~ read_query }
+
+read_query = { clause+ }
+
+// =====================================================================
+// 3. Clauses
+// =====================================================================
+
+// Queries like `RANK BY HYBRID(...) WITH FUSION = RRF(...) LIMIT 10`
+// need standalone
+// ORDER BY / SKIP / LIMIT tails. We expose them as their own
+// clauses (`tail_*_clause`) at the read_query level rather than
+// nesting inside `return_clause`. The semantic analyzer (M4-02)
+// folds them back into a ReturnClause when one exists.
+// `clause` = a `core_clause` (everything except the standalone
+// ORDER BY / SKIP / LIMIT tails) OR one of the three tail clauses.
+// `core_clause` is SILENT (`_{}`) so its matched alternative
+// (`match_clause`, `return_clause`, …) is emitted DIRECTLY as the
+// child of whatever contains it — `clause` here AND `union_body`
+// (ADR-185). This keeps `parser.rs::parse_clause`'s `first_inner`
+// dispatch UNCHANGED (it still sees `match_clause` / `return_clause`
+// / `tail_*_clause` as the inner) while giving `union_body` a
+// tail-free clause stream for free (RC-2 — the union arms cannot
+// carry an ORDER BY / SKIP / LIMIT tail; that tail is factored to the
+// post-union `union_tail`).
+clause = {
+      core_clause
+    | tail_order_by_clause
+    | tail_skip_clause
+    | tail_limit_clause
+}
+
+// The tail-free clause set (ADR-185 §8 — union arms reuse this).
+// SILENT so it is transparent in the pair tree (see `clause` above).
+core_clause = _{
+      optional_match_clause   // OPTIONAL MATCH … (must precede match_clause)
+    | match_clause
+    | with_fusion_clause      // tighter prefix: WITH FUSION = …
+    | with_clause             // generic WITH …
+    | call_procedure_clause   // CALL <proc>(args) [YIELD …] — ADR-197 (#802); MUST precede call_clause (both start kw_call; proc form has a dotted name, subquery form has `{`)
+    | call_clause             // CALL { <subquery> } — ADR-192 (#623); MUST precede unwind for no overlap (distinct kw)
+    | show_clause             // SHOW CONSTRAINTS / INDEXES / DATABASES — ADR-197 (#802)
+    | unwind_clause
+    | rank_by_clause
+    | create_clause           // CREATE (var?:Label? {props}) — ADR-147 W26-θ Phase 1
+    | delete_clause           // (DETACH?) DELETE var (, var)* — ADR-149 W26-θ Phase 3
+    | set_clause              // SET set_item (, set_item)*   — ADR-150 W26-θ Phase 4
+    | remove_clause           // REMOVE remove_item (, ...)*  — ADR-150 W26-θ Phase 4
+    | merge_clause            // MERGE <pattern> [ON CREATE SET …]* [ON MATCH SET …]* — ADR-151 W26-θ Phase 5
+    | return_clause
+}
+
+tail_order_by_clause = { order_by }
+tail_skip_clause     = { skip }
+tail_limit_clause    = { limit }
+
+// ----- MATCH ---------------------------------------------------------
+
+match_clause = {
+    kw_match ~ match_body ~ where_sub?
+}
+
+// `OPTIONAL MATCH …` per ADR-006 amendment-01 + ADR-038 amendment-03
+// §TIER-1 GAP D. Same body shape as plain `MATCH` (we re-use
+// `match_body` / `where_sub`); the M4-22 binding pass branches on
+// `Clause::OptionalMatch` to set `BoundMatchClause::is_optional = true`
+// and propagate `BoundVariable::may_be_null = true` to every variable
+// declared in this clause.
+optional_match_clause = {
+    kw_optional ~ kw_match ~ match_body ~ where_sub?
+}
+
+match_body = {
+      named_path_match    // p = SHORTEST_PATH(...) | p = (a)-[..]->(b)
+    | pattern_list        // (a)-[r]->(b), (c) ...
+}
+
+named_path_match = {
+    identifier ~ "="
+        ~ ( all_shortest_path_pattern | shortest_path_pattern | path_pattern )
+}
+
+pattern_list   = { path_pattern ~ ("," ~ path_pattern)* }
+// Compound atomic: suppresses pest's implicit WS within
+// path_pattern (so the bare `-->` arrow shapes commit cleanly)
+// while allowing inner non-atomic rules (node_pattern,
+// rel_pattern, etc.) to continue emitting their pair structure.
+// Empirically the implicit WS was responsible for the bug where
+// `(a)-->(b)` parsed as if the rel_pattern + tail node didn't
+// exist — pest committed to the rel_pattern atomic rule but the
+// outer non-atomic dispatch silently lost the inner pairs.
+path_pattern   = ${
+    node_pattern
+    ~ ( ws_opt ~ rel_pattern ~ ws_opt ~ node_pattern )*
+}
+
+// ADR-194 D-1/D-3 — `SHORTEST_PATH(...)` (macro) AND `shortestPath(...)`
+// (canonical camelCase) are TWO SPELLINGS of the SAME single-shortest-path
+// algorithm; both match this one rule, so the spelling distinction is
+// erased at the grammar layer and `parse_named_path_match` maps the rule
+// uniformly to `NamedPathKind::ShortestPath`. The uppercase macro stays
+// accepted (back-compat, ADR-038 §D-7 — do NOT break it).
+shortest_path_pattern = {
+    ( kw_shortest_path | kw_shortest_path_camel ) ~ "(" ~ path_pattern ~ ")"
+}
+
+// ADR-194 D-1/D-2 — canonical `allShortestPaths(...)`. A DISTINCT rule
+// (not folded into `shortest_path_pattern`) so the rule name carries the
+// algorithm discriminant: `parse_named_path_match` maps it to
+// `NamedPathKind::AllShortestPath` with no keyword introspection. Tried
+// FIRST in the `named_path_match` choice (its keyword is a distinct
+// prefix, so ordering is for clarity, not disambiguation).
+all_shortest_path_pattern = {
+    kw_all_shortest_path ~ "(" ~ path_pattern ~ ")"
+}
+
+where_sub = { kw_where ~ where_expr }
+
+// ----- node / relationship patterns ---------------------------------
+
+// node_pattern is compound-atomic for the same reason as
+// path_pattern (the load-bearing pest interaction described in
+// the path_pattern comment above). Explicit ws_opt allows
+// human-readable spacing between sub-elements (e.g. `(n {a:1})`
+// with a space between `n` and `{`).
+node_pattern = ${
+    "(" ~ ws_opt
+    ~ node_var?    ~ ws_opt
+    ~ label_spec?  ~ ws_opt
+    ~ property_map? ~ ws_opt
+    ~ ")"
+}
+node_var   = { identifier }
+label_spec = ${ ":" ~ ws_opt ~ identifier ~ ( ws_opt ~ ":" ~ ws_opt ~ identifier )* }
+
+// Relationship pattern: openCypher form (`*N..M` inside brackets)
+// vs. GQL form (`{N,M}` outside). Both are admitted; per ADR-038
+// D-9 the GQL form is parser-reserved at v1.0, lit at M10.
+//
+// The arrow tokens (`-`, `->`, `<-`) are made atomic via the
+// `arrow_*` helper rules to suppress pest's implicit whitespace
+// insertion between the dash characters. Without this, pest would
+// allow `- -> (b)` (with mid-token spaces) but, more critically,
+// fail to parse `-->` because the optional `rel_detail?` skips
+// successfully (no `[`) and pest's implicit whitespace insertion
+// then expects to consume zero-or-more whitespace before `->`,
+// which subtly breaks the `-` / `->` lookahead disambiguation.
+// The atomic helpers force pest to commit to the multi-character
+// arrow shape as a single token.
+// Relationship pattern. The whole shape (`-`, `-[..]-`, `->`,
+// `-[..]->`, `<-`, `<-[..]-`, optional GQL `{N,M}` quantifier
+// suffix) is parsed as a SINGLE atomic token via `rel_pattern_raw`.
+// The Rust-side `parse_rel_pattern` re-tokenizes the matched text
+// to extract var / rel_types / direction / length / properties.
+//
+// Why atomic: pest's non-atomic dispatch from path_pattern into a
+// rel_pattern alternative starting with `-` followed by another
+// `-` (the bare `--` and `-->` shapes — no `[..]` rel_detail)
+// silently consumed the whole tail of the input without emitting
+// inner pairs. Symptom: `path_pattern.as_str() == "(a)-->(b)
+// RETURN a"` but `inner` only had `node_pattern = "(a)"`. The
+// symptom matches a known pest 2.x interaction where an
+// alternative whose first token is a bare-character literal that
+// also appears as a prefix of a longer literal in another
+// alternative confuses the alternative-tracking. Folding the
+// whole shape into one atomic rule sidesteps the issue.
+// rel_pattern atomic, with alternatives ordered LONGEST FIRST so
+// the bare `-->` shape isn't mis-shadowed by a shorter `--` match
+// that leaves `>` for the outer rule. The "longest match" property
+// is what classic LR-style parsers do for free; PEG's ordered
+// choice requires us to spell it out.
+rel_pattern = @{
+      "<-" ~ rel_detail_atom ~ "-"   ~ rel_quant_atom?  // <-[..]-
+    | "-"  ~ rel_detail_atom ~ "->"  ~ rel_quant_atom?  // -[..]->
+    | "-"  ~ rel_detail_atom ~ "-"   ~ rel_quant_atom?  // -[..]-
+    | "<--"                           ~ rel_quant_atom? // <-- (no detail)
+    | "-->"                           ~ rel_quant_atom? // --> (no detail)
+    | "--"                            ~ rel_quant_atom? // -- (undirected, no detail)
+}
+rel_detail_atom = @{ "[" ~ ( !"]" ~ ANY )* ~ "]" }
+rel_quant_atom  = @{ "{" ~ ASCII_DIGIT+ ~ "," ~ ASCII_DIGIT* ~ "}" }
+
+// Tabs/spaces but no newlines — used in compound-atomic rules
+// where pest's implicit WHITESPACE is suppressed but we still need
+// to allow trivial inter-token whitespace for human-readable
+// formatting.
+ws_opt = _{ ( " " | "\t" )* }
+
+// property_map allows whitespace between every entry; compound-
+// atomic with explicit ws_opt for the same reason node_pattern is.
+property_map = ${
+    "{" ~ ws_opt
+    ~ ( prop_entry ~ ws_opt ~ ( "," ~ ws_opt ~ prop_entry ~ ws_opt )* )?
+    ~ "}"
+}
+prop_entry = ${ identifier ~ ws_opt ~ ":" ~ ws_opt ~ expression }
+
+// ----- CREATE (ADR-147 W26-θ Phase 1 — CREATE node; ADR-148 W26-θ Phase 2 — CREATE rel) ----
+//
+// `CREATE (var?:Label? {prop: value, ...})` per openCypher v9 §6
+// "Updating Clauses". Phase 1 (ADR-147) admits single-node CREATEs
+// with optional variable binding, optional SINGLE label, and an
+// optional literal-only property bag.
+//
+// Phase 2 (ADR-148, this commit) ADDS a path-shape alternative
+// `CREATE (source)-[rel:LABEL {props}]->(target)`. The rel-label is
+// MANDATORY at Phase 2 per ADR-148 §D-1; undirected + variable-length
+// CREATE forward-pinned to Phase 4 / v1.2 per ADR-148 §"Forward-deferred".
+//
+// `create_node` is compound-atomic (`${ ... }`) for the same reason
+// as `node_pattern` (see the rationale at the top of `node_pattern`):
+// pest's implicit WHITESPACE insertion was responsible for empty-
+// inner-pair bugs at `(var)` patterns.
+//
+// Discipline: this is INDEPENDENT from `node_pattern` so the AST can
+// keep `MATCH`-shape vs `CREATE`-shape diagnostics distinct at parse
+// time (a `MATCH (n:A:B)` admits multi-label per openCypher v9; a
+// `CREATE (n:A:B)` Phase 1 rejects multi-label per ADR-147). Same
+// rationale for keeping `create_rel` distinct from `rel_pattern`
+// (CREATE rel rejects undirected at Phase 2; MATCH rel admits).
+create_clause = {
+    kw_create ~ create_item ~ ("," ~ create_item)*
+}
+
+// PEG ordered choice + longest-match: `create_path` (which starts
+// with a `create_node`) must come BEFORE the bare `create_node`
+// alternative so the parser commits to the path shape when the trailing
+// arrow + rel + node is present. The `create_node` arm handles the
+// node-only Phase 1 shape unchanged.
+create_item   = { create_path | create_node }
+
+// Phase 2 (ADR-148) — path shape: source node + rel + target node.
+// Compound-atomic for the same WHITESPACE-suppression rationale as
+// `path_pattern`. The MATCH-side `path_pattern` re-tokenizes the
+// rel via a single atomic `rel_pattern_raw`; CREATE-side splits the
+// rel into structured sub-productions (`create_rel_detail` /
+// `create_rel_var` / `create_rel_label`) so the parser handler can
+// extract fields directly without the re-tokenizing step.
+create_path   = ${
+    create_node ~ ws_opt ~ create_rel ~ ws_opt ~ create_node
+}
+
+// CREATE rel: arrow + bracketed detail. Mandatory label at Phase 2
+// per ADR-148 §D-1 (undirected `-[r:R]-` forward-pinned to Phase 4).
+// Two shapes — left-to-right `-[..]->` and right-to-left `<-[..]-`.
+create_rel    = ${
+      "<" ~ "-" ~ create_rel_detail ~ "-"
+    | "-"       ~ create_rel_detail ~ "->"
+}
+
+// CREATE rel detail: `[var? :LABEL {props}?]` — same shape as
+// `node_pattern`'s bracketed detail but with the label mandatory + at
+// most one (multi-rel-type `[r:A|B]` forward-pinned alongside the
+// MATCH-side narrowing per ADR-038 D-9).
+create_rel_detail = ${
+    "[" ~ ws_opt
+    ~ create_rel_var?   ~ ws_opt
+    ~ create_rel_label  ~ ws_opt
+    ~ property_map?     ~ ws_opt
+    ~ "]"
+}
+create_rel_var   = { identifier }
+create_rel_label = ${ ":" ~ ws_opt ~ identifier }
+
+create_node   = ${
+    "(" ~ ws_opt
+    ~ create_node_var?   ~ ws_opt
+    ~ create_label?      ~ ws_opt
+    ~ property_map?      ~ ws_opt
+    ~ ")"
+}
+create_node_var = { identifier }
+create_label    = ${ ":" ~ ws_opt ~ identifier }
+
+// ----- DELETE (ADR-149 W26-θ Phase 3) -------------------------------
+//
+// `DELETE var (, var)*` per openCypher v9 §6 "Updating Clauses".
+// Phase 3 (ADR-149) admits two shapes — bare DELETE + DETACH DELETE —
+// distinguished by the optional `DETACH` prefix. The grammar admits
+// IDENTIFIER arguments only; literal / property-access /
+// function-call / parameter arguments are not openCypher v9 surface
+// (the type-checker double-checks at the binding / type-check layer
+// in case the grammar ever loosens — defense-in-depth).
+//
+// Discipline: keep `delete_clause` distinct from MATCH / WITH /
+// RETURN dispatch (same rationale as `create_clause` —
+// per-write-op-clause grammar position keeps PEG ordered-choice
+// commitments clean).
+delete_clause = { detach? ~ kw_delete ~ delete_item ~ ("," ~ delete_item)* }
+detach        = { kw_detach }
+delete_item   = { identifier }
+
+// ----- SET (ADR-150 W26-θ Phase 4) ----------------------------------
+//
+// `SET set_item (, set_item)*` per openCypher v9 §6 "Updating Clauses".
+// Phase 4 (ADR-150) admits four set_item shapes:
+//
+//   set_property_assign  — `n.prop = expr`           (per-key write)
+//   set_property_merge   — `n += {prop: val, ...}`   (additive merge)
+//   set_property_replace — `n  = {prop: val, ...}`   (full overwrite)
+//   set_label_add        — `n:Label1:Label2`         (multi-label add)
+//
+// PEG ordered-choice ordering: each alternative is disjoint at the
+// SECOND token after the leading identifier — `.` (assign), `+=`
+// (merge), `=` (replace), `:` (label). The order admits the most
+// frequent shape first (per-key assign), then merge, then replace,
+// then label. Each branch commits unambiguously after its
+// distinguishing-token.
+//
+// Discipline: keep `set_clause` distinct from create / delete /
+// MATCH / WITH / RETURN dispatch (same rationale as `delete_clause`
+// — per-write-op-clause grammar position keeps PEG ordered-choice
+// commitments clean). No PEG conflict with `set_label_add`'s `:`
+// vs node-pattern label `:` because the `set_label_add` is admitted
+// only at the `set_item` position (inside `set_clause`).
+set_clause = { kw_set ~ set_item ~ ("," ~ set_item)* }
+set_item = {
+      set_property_assign
+    | set_property_merge
+    | set_property_replace
+    | set_label_add
+}
+set_property_assign  = { identifier ~ "." ~ identifier ~ "=" ~ expression }
+set_property_merge   = { identifier ~ "+=" ~ property_map }
+set_property_replace = { identifier ~ "=" ~ property_map }
+set_label_add        = { identifier ~ (":" ~ identifier)+ }
+
+// ----- REMOVE (ADR-150 W26-θ Phase 4) -------------------------------
+//
+// `REMOVE remove_item (, remove_item)*` per openCypher v9 §6 "Updating
+// Clauses". Phase 4 (ADR-150) admits two remove_item shapes:
+//
+//   remove_property — `n.prop`             (per-key clear)
+//   remove_label    — `n:Label1:Label2`    (multi-label remove)
+//
+// PEG ordered-choice ordering: disjoint at the second token after the
+// leading identifier — `.` (property) and `:` (label).
+remove_clause = { kw_remove ~ remove_item ~ ("," ~ remove_item)* }
+remove_item = {
+      remove_property
+    | remove_label
+}
+remove_property = { identifier ~ "." ~ identifier }
+remove_label    = { identifier ~ (":" ~ identifier)+ }
+
+// ----- MERGE (ADR-151 W26-θ Phase 5) --------------------------------
+//
+// `MERGE <pattern> [ON CREATE SET <set_item> (, <set_item>)*]*
+//                  [ON MATCH  SET <set_item> (, <set_item>)*]*`
+// per openCypher v9 §6 "MERGE": match-or-create.
+//
+// Phase 5 (ADR-151) admits two pattern shapes:
+//
+//   merge_pattern → create_path | create_node
+//
+// reusing the Phase 1 (`create_node`) + Phase 2 (`create_path`)
+// productions verbatim. The optional action clauses each carry a
+// Phase 4 `set_clause` body — the `merge_on_create` / `merge_on_match`
+// wrappers extract the action's branch discriminator (`ON CREATE` vs
+// `ON MATCH`) from the leading tokens and delegate the body to the
+// existing `set_clause` parser.
+//
+// PEG ordered-choice ordering within `merge_pattern`: `create_path`
+// comes BEFORE `create_node` so the parser commits to the path shape
+// when the trailing arrow + rel + node is present (parallel to the
+// `create_item` ordered choice at line 448).
+//
+// PEG ordered-choice ordering within `merge_action`: `merge_on_create`
+// + `merge_on_match` are disjoint at the THIRD token (`ON CREATE` vs
+// `ON MATCH`); each alternative commits unambiguously after its
+// distinguishing-token. Both productions REUSE the existing
+// `kw_create` / `kw_match` keyword wrappings (each appending
+// `~ kw_end` so `CREATEFOO` / `MATCHFOO` reject at parse — the
+// boundary-check property the bare `^"CREATE"` / `^"MATCH"` literal
+// matches did NOT carry). Both keywords are ALREADY in the `keyword`
+// exclusion set (CREATE per Phase 1; MATCH from the original
+// convention); case-insensitive matching is inherited from the
+// existing keyword definitions.
+//
+// Discipline: keep `merge_clause` distinct from create / delete / set /
+// remove / MATCH / WITH / RETURN dispatch (same rationale as
+// `set_clause` — per-write-op-clause grammar position keeps PEG
+// ordered-choice commitments clean).
+merge_clause = { kw_merge ~ merge_pattern ~ merge_action* }
+merge_pattern = { create_path | create_node }
+merge_action = { merge_on_create | merge_on_match }
+merge_on_create = { kw_on ~ kw_create ~ set_clause }
+merge_on_match  = { kw_on ~ kw_match  ~ set_clause }
+
+// ----- WITH / UNWIND ------------------------------------------------
+
+// `with_clause` excludes `WITH FUSION = …` via negative lookahead so
+// the more-specific production wins.
+with_clause = {
+    kw_with ~ !( ^"FUSION" ~ kw_end )
+    ~ kw_distinct? ~ projection_list ~ where_sub?
+}
+unwind_clause = { kw_unwind ~ expression ~ kw_as ~ identifier }
+
+// ----- CALL { <subquery> } (ADR-192 / #623) -------------------------
+//
+// A `CALL { … }` brace-subquery (Cypher 25 — a beyond-openCypher-v9
+// capability extension; NOT the procedure-call `CALL proc()` form,
+// which is out of scope). The subquery body is a FULL read query —
+// either a `union_query` (UNION / UNION ALL arms, ADR-185) or a bare
+// `read_query` (MATCH/WITH/UNWIND/RETURN/ORDER BY/LIMIT/…). `union_query`
+// MUST precede `read_query` for the same PEG-ordering reason as the
+// top-level `statement` rule (a body with no UNION fails the
+// `(kw_union …)+` repetition and backtracks to `read_query`). EXPLAIN /
+// PROFILE / DDL are intentionally NOT admissible inside a subquery —
+// only the two read-query shapes. The implicit import of
+// the outer scope's in-scope variables (Cypher 25 semantics) is a
+// BIND-time concern (ADR-192 D-3), not a grammar one. The `{` after
+// `CALL` is what disambiguates the subquery from a (non-existent)
+// procedure-call form at parse.
+call_clause = { kw_call ~ "{" ~ ( union_query | read_query ) ~ "}" }
+
+// ----- CALL <proc>(args) [YIELD …] (ADR-197 / #802) -----------------
+//
+// Procedure-call form for schema-introspection procedures the
+// langchain-neo4j driver sends on connect (`CALL apoc.meta.data(...)
+// YIELD label, …`, `CALL db.labels() YIELD label`). The dotted name
+// (`qualified_proc_name` requires ≥1 `.`) + `(` disambiguates from the
+// `CALL { … }` subquery form (which requires `{`). The YIELD'd items
+// become bindings that flow into the following WHERE / RETURN clauses
+// exactly like UNWIND's output binding.
+call_procedure_clause = {
+    kw_call ~ qualified_proc_name ~ "(" ~ proc_arg_list? ~ ")"
+        ~ ( kw_yield ~ yield_item_list ~ where_sub? )?
+}
+qualified_proc_name = @{ identifier_inner ~ ("." ~ identifier_inner)+ }
+proc_arg_list = { expression ~ ("," ~ expression)* }
+yield_item_list = { yield_item ~ ("," ~ yield_item)* }
+yield_item = { identifier ~ ( kw_as ~ identifier )? }
+
+// ----- SHOW <kind> [YIELD …] (ADR-197 / #802 · #830 ADR-198 §OQ-7) ---
+//
+// Minimal SHOW commands sent by Neo4j-compatible clients.
+// `SHOW CONSTRAINTS` / `SHOW INDEXES` (ADR-197) parse + return
+// rows (empty for an empty schema) rather than erroring; `SHOW
+// DATABASES` returns the single default db.
+//
+// #830 adds `SHOW VECTOR INDEXES` (the multi-word kind — handled with
+// separate `kw_vector ~ kw_indexes` tokens per the `OPTIONAL MATCH`
+// idiom, so inter-word whitespace is the implicit-WHITESPACE concern,
+// NOT an atomic-rule concern) AND the optional `YIELD <items>
+// [WHERE <pred>]` tail. Compatible vector clients send
+// `SHOW VECTOR INDEXES YIELD name, labelsOrTypes, properties, options
+//  WHERE name = $index_name RETURN …` — so the bare-kind form alone
+// does NOT unblock it. The YIELD/WHERE tail mirrors
+// `call_procedure_clause` EXACTLY (the YIELD'd items become bindings
+// flowing into the WHERE here + a following RETURN clause); the
+// executor surfaces the SHOW rows and the standard Filter/Project ops
+// handle WHERE/RETURN downstream (same path as `CALL … YIELD … WHERE`).
+show_clause = {
+    kw_show ~ ( show_vector_indexes | show_kind )
+        ~ ( kw_yield ~ yield_item_list ~ where_sub? )?
+}
+show_vector_indexes = { kw_vector ~ kw_indexes }
+show_kind = @{ ^"CONSTRAINTS" | ^"INDEXES" | ^"DATABASES" }
+
+projection_list = { projection_item ~ ("," ~ projection_item)* }
+projection_item = { ( wildcard | expression ) ~ ( kw_as ~ identifier )? }
+wildcard = { "*" }
+
+// ----- RANK BY HYBRID -------------------------------------------------
+
+// Optional `AS <identifier>` exposes the fused score as a normal
+// value binding for downstream RETURN / WITH / ORDER BY clauses.
+rank_by_clause = { kw_rank ~ kw_by ~ ranker ~ ( kw_as ~ identifier )? }
+
+ranker = { hybrid_ranker }
+
+hybrid_ranker = {
+    kw_hybrid ~ "(" ~ rank_arg ~ ("," ~ rank_arg)* ~ ")"
+}
+rank_arg = {
+      vector_rank_arg
+    | text_rank_arg
+}
+vector_rank_arg = {
+    kw_vector ~ "(" ~ field_ref ~ "," ~ expression ~ ( "," ~ k_assign )? ~ ")"
+}
+text_rank_arg = {
+    kw_text ~ "(" ~ field_ref ~ "," ~ expression ~ ( "," ~ k_assign )? ~ ")"
+}
+k_assign = { kw_K_upper ~ "=" ~ int_literal }
+
+// ----- WITH FUSION = RRF ----------------------------------------------
+
+with_fusion_clause = {
+    kw_with ~ kw_fusion ~ "=" ~ fusion_expr
+}
+fusion_expr = { rrf_fusion }
+rrf_fusion = {
+    kw_rrf ~ "(" ~ rrf_arg ~ ("," ~ rrf_arg)* ~ ")"
+}
+rrf_arg = {
+      kw_k ~ "=" ~ int_literal
+}
+
+// ----- RETURN -------------------------------------------------------
+
+return_clause = {
+    kw_return ~ kw_distinct? ~ projection_list
+}
+order_by   = { kw_order ~ kw_by ~ order_item ~ ("," ~ order_item)* }
+order_item = { expression ~ ( kw_asc | kw_desc )? }
+skip       = { kw_skip  ~ expression }
+limit      = { kw_limit ~ expression }
+
+// =====================================================================
+// 4. WHERE expressions
+//    Precedence:  OR  <  XOR  <  AND  <  NOT  <  comparison
+//              <  add  <  mul  <  pow  <  unary  <  atom
+// =====================================================================
+
+// Two parallel expression-precedence ladders:
+//
+// - `where_expr` (used inside WHERE clauses) admits the
+//   "special predicates" — the four ArcGraph operators NEAR /
+//   MATCH / IN COMMUNITY / IS NULL plus IN-with-list-or-param.
+//   These operators are SUFFIXES on a left-hand-side expression.
+//
+// - `expression` (used in RETURN / projection / function args)
+//   admits only the standard operators (boolean / comparison /
+//   arithmetic). The special predicates are NOT admissible —
+//   per ADR-038 D-6, the operator `MATCH` overloads the clause
+//   keyword `MATCH`, so allowing it inside a projection
+//   expression would let `RETURN x MATCH y` greedily consume the
+//   following clause.
+//
+// Both ladders share the lower-precedence rules (or_expr_*,
+// and_expr_*, etc.) via the suffix discipline.
+
+where_expr = { where_or_expr }
+expression = { expr_or_expr }
+
+// Precedence ladder (loosest→tightest): OR → XOR → AND → NOT →
+// comparison (openCypher v9 §boolean; #621). The `where_xor_expr`
+// level sits BETWEEN or and and so `a OR b XOR c` parses as
+// `a OR (b XOR c)` (XOR binds tighter than OR) and `a XOR b AND c`
+// parses as `a XOR (b AND c)` (AND binds tighter than XOR) — per
+// Precedence1 [1]/[2].
+where_or_expr  = { where_xor_expr ~ ( kw_or  ~ where_xor_expr  )* }
+where_xor_expr = { where_and_expr ~ ( kw_xor ~ where_and_expr  )* }
+where_and_expr = { where_not_expr ~ ( kw_and ~ where_not_expr  )* }
+// `kw_not*` (not `kw_not?`) so double-negation `NOT NOT x` parses
+// (openCypher v9 §boolean; TCK Boolean4 [2], #1050). The parser
+// (`parse_not_expr`) COUNTS the `kw_not` occurrences and folds the inner
+// expression in that many nested `UnaryOp::Not` layers — a real
+// `Not(Not(x))` AST, NOT a parity-bool collapse, so each level's
+// type-check stays intact (Boolean4 [4] InvalidArgumentType).
+where_not_expr = { kw_not* ~ where_comparison_expr }
+// Note: `where_comparison_expr` admits chained comparison-with-
+// special_pred (e.g., `n.x NEAR $q < 5`) syntactically. These
+// produce semantically incoherent expressions (boolean compared
+// with int). M4-22 type-check rejects via TypeMismatch — the
+// `<` / `<=` / `>` / `>=` arms in `check_binary_op` invoke
+// `is_orderable`, which rejects non-orderable static types,
+// emitting `TypeCheckError::TypeMismatch`. Verified per ADR-038
+// §D-22 + amendment-04 §D-X.2(a).
+//
+// (PR #154 Finding 4 — bounded over-acceptance; the syntactic
+// layer is permissive on purpose so the type-checker layer has
+// canonical jurisdiction over expression-coherence rejection.)
+//
+// Keep the emitted grammar flat for the #819 expression-depth stack
+// boundary. `parser.rs::parse_comparison_expr` gives `special_pred`
+// postfixes operand precedence by consuming predicates after each
+// comparison RHS before constructing the binary comparison.
+where_comparison_expr = {
+    add_expr ~ ( comparison_op ~ add_expr | special_pred )*
+}
+
+// Same OR → XOR → AND ladder as the where_* side (#621); the
+// `expr_xor_expr` level is inserted between or and and so the
+// precedence is identical in RETURN / projection position.
+expr_or_expr  = { expr_xor_expr ~ ( kw_or  ~ expr_xor_expr  )* }
+expr_xor_expr = { expr_and_expr ~ ( kw_xor ~ expr_and_expr  )* }
+expr_and_expr = { expr_not_expr ~ ( kw_and ~ expr_not_expr  )* }
+// `kw_not*` (not `kw_not?`) so double-negation `NOT NOT x` parses at
+// RETURN / projection position too (mirrors `where_not_expr`; #1050).
+expr_not_expr = { kw_not* ~ expr_comparison_expr }
+// The expr ladder admits the CLAUSE-KEYWORD-SAFE subset of the special
+// predicates (`expr_special_pred` = `IN` + `IS NULL`) so they work at
+// RETURN / projection position (openCypher v9 §3.3 — `IN` and `IS NULL`
+// are general expression operators; TCK List5 `[1]-[41]` put `IN` in a
+// RETURN). `NEAR` / `MATCH` / `IN COMMUNITY` stay WHERE-only: `MATCH`
+// overloads the clause keyword (grammar comment §"Two parallel
+// ladders"), and the other two are ArcGraph extensions with no
+// RETURN-position consumer.
+expr_comparison_expr = {
+    add_expr ~ ( comparison_op ~ add_expr | expr_special_pred )*
+}
+
+comparison_op = {
+      "<>" | "<=" | ">="
+    | "=" | "<" | ">"
+}
+
+special_pred = {
+      near_op
+    | text_match_op
+    | community_membership_op
+    | starts_with_op
+    | ends_with_op
+    | contains_op
+    | in_op
+    | is_null_pred
+}
+
+// The RETURN/projection-position special-predicate subset: the
+// openCypher-standard, clause-keyword-safe operators. Parsed by the SAME
+// `apply_special_pred` handler as the WHERE-ladder `special_pred` (it
+// `first_inner`s to the concrete op). The string predicates STARTS WITH /
+// ENDS WITH / CONTAINS join `IN` / `IS NULL` here because — unlike the
+// `MATCH` text-match operator — they overload NO clause keyword, so they
+// are safe in RETURN / projection position (TCK Precedence4 [4] RETURNs
+// `'abc' STARTS WITH null`; #773).
+expr_special_pred = {
+      starts_with_op
+    | ends_with_op
+    | contains_op
+    | in_op
+    | is_null_pred
+}
+
+near_op = {
+    kw_near ~ add_expr ~ ( kw_vector_index ~ identifier )?
+}
+text_match_op = {
+    kw_match ~ add_expr
+}
+// `n IN COMMUNITY(...)` per ADR-038 amendment-01 (alternate
+// surface; canonical D-4 shape uses `community(...)` function call,
+// matched as a regular FunctionCall expression).
+community_membership_op = {
+    kw_in ~ kw_community ~ "(" ~ expression ~ ")"
+}
+// openCypher v9 §3.3.5 — `<expr> IN <expr>` list membership. The RHS is
+// a full `add_expr` (broadened from the old `list_or_param` set) so a
+// subscripted / sliced RHS parses (`3 IN list[0]`, `3 IN [1,2,3][0..1]`
+// — TCK List5 [1]-[4]). Permissive-parse / type-check-jurisdiction
+// discipline: the type-checker REJECTS a non-list RHS (`1 IN true` —
+// List5 [42]) via `check_list_operand`, so the grammar need not
+// constrain the RHS shape. `add_expr` stops at `AND`/`OR`/`AS`/`)` etc.
+// (none are `add_op`), so the suffix-loop boundary is unchanged.
+in_op = {
+    kw_in ~ add_expr
+}
+is_null_pred = {
+    kw_is ~ kw_not? ~ kw_null
+}
+// openCypher v9 §3.3.6 string-comparison predicates. `<string> STARTS WITH
+// <string>` (prefix), `ENDS WITH` (suffix), `CONTAINS` (substring). The RHS
+// is a full `add_expr` (mirrors `in_op`) so a parenthesized / concatenated
+// operand parses — `name STARTS WITH 'pre' + 'fix'`, and the
+// `STARTS WITH (null OR true)` form of Precedence4 [4] (the parens lift to
+// the full ladder via `primary_atom`). Type/null semantics (string operands;
+// any-null ⇒ null 3VL; non-string ⇒ null) are enforced downstream at
+// type-check + executor, NOT in the grammar (permissive-parse discipline,
+// same as `in_op`).
+starts_with_op = {
+    kw_starts ~ kw_with ~ add_expr
+}
+ends_with_op = {
+    kw_ends ~ kw_with ~ add_expr
+}
+contains_op = {
+    kw_contains ~ add_expr
+}
+
+add_expr = { mul_expr ~ ( add_op ~ mul_expr )* }
+add_op   = { "+" | "-" }
+mul_expr = { unary_expr ~ ( mul_op ~ unary_expr )* }
+mul_op   = { "*" | "/" | "%" | "^" }
+
+unary_expr = {
+      ( "-" | "+" ) ~ unary_expr
+    | atom
+}
+
+// openCypher exponentiation. `^` is tokenized directly in the multiplicative
+// grammar tier to preserve the parser's existing recursion-depth budget; the
+// AST builder folds it as the effective ladder `add < mul < pow < unary < atom`
+// with left-associative `^` chains.
+
+atom = {
+    primary_atom ~ accessor*
+}
+// `primary_atom` — note the parenthesized sub-expression uses
+// `where_expr` (the full ladder including `special_pred`) so that
+// constructs like `(n.x NEAR $q)` are admissible inside expression
+// contexts. The OUTER `expression` ladder excludes `special_pred`
+// at the top level, but parens-wrap lifts the restriction. The
+// resulting Boolean from `(n.x NEAR $q)` at RETURN position is
+// intentional over-acceptance — RETURN of Boolean is acceptable
+// per Cypher 9 §3.4 (per ADR-038 amendment-04 §D-X.2(b)); the
+// M4-22 type-check (`check_projection_item` →
+// `check_expression`) does not reject it. Type-incoherent
+// embeddings (e.g., the Boolean operand to an orderable
+// comparison in `n.x NEAR $q < 5`) are rejected by the M4-22
+// type-check pass at `check_binary_op` (per ADR-038 §D-22 +
+// amendment-04 §D-X.2(a)). The parser is purely syntactic.
+//
+// (PR #154 Finding 3 — bounded over-acceptance; the type-check
+// layer holds canonical jurisdiction.) The infinite-recursion
+// path (where_expr → primary_atom → where_expr) is bounded by
+// the `(` `)` token-level commit per pest's PEG semantics.
+primary_atom = {
+      parameter
+    // CASE expression (openCypher v9 §3.6; #621). Tried EARLY (right after
+    // `parameter`): `case_expr` commits on the `CASE` keyword, which no other
+    // `primary_atom` alternative starts with, so the position is unambiguous
+    // — but it MUST precede `function_call` / `identifier` (both of which
+    // could otherwise match the bare `CASE` token as a call name / variable).
+    // A malformed `CASE` lacking the WHEN…THEN skeleton fails this production
+    // and PEG backtracks to the bare `identifier` arm (permissive — the
+    // soft-keyword posture; an unbound `CASE` variable surfaces downstream).
+    | case_expr
+    // W23-V11-T-01 / ADR-090 — temporal + decimal constructor
+    // literals are SHAPE-AMBIGUOUS with a `function_call` (both
+    // start with an identifier followed by `(`). The PEG ordered
+    // choice puts `literal` BEFORE `function_call` so the temporal
+    // constructor commits cleanly; the regular function-call path
+    // still handles every non-temporal-keyword identifier. This is
+    // load-bearing: without the reorder, `datetime('...')` would
+    // parse as a function call named "datetime", then the
+    // type-checker would surface `UnknownFunction` instead of the
+    // correct typed temporal value.
+    // ADR-188 (#620 list-half) — list comprehension. Placed BEFORE
+    // `literal` (which contains `list_literal`): a list comprehension
+    // `[x IN list …]` is SHAPE-AMBIGUOUS with a list literal `[…]`
+    // (both open with `[`). The PEG ordered choice tries
+    // `list_comprehension` first; it commits when `identifier ~ IN`
+    // follows the `[`, otherwise PEG backtracks and `list_literal`
+    // (inside `literal`) handles the comma-separated-expression form.
+    // openCypher v9 §3.5 `ListComprehension` — NOT a list literal.
+    | list_comprehension
+    | literal
+    // ADR-188 — list-predicate special forms. Placed BEFORE
+    // `function_call` (same SHAPE-AMBIGUITY hazard the temporal
+    // literals solved above): `all(`/`any(`/`none(`/`single(`/`reduce(`
+    // all start with a keyword followed by `(`, identical in prefix to a
+    // function call. The PEG ordered choice commits to the special form
+    // when the `IN` (for filter) / `=` + `,` + `|` (for reduce) follow;
+    // otherwise PEG backtracks and the regular `function_call` path
+    // handles every other `identifier(...)`. Each is openCypher v9's
+    // dedicated `FilterExpression` / `Reduce` production — NOT a
+    // `FunctionInvocation` (ADR-188 Decision 2).
+    | filter_expr
+    | reduce_expr
+    // ADR-191 D-6 (#620 map-half) — map projection `n{.key, alias: e, .*}`
+    // (openCypher v9 §3.5). Placed BEFORE `function_call` and the bare
+    // `identifier`: a map projection and a function call BOTH open with an
+    // `identifier`, but they disambiguate at the SECOND token —
+    // `map_projection` commits on `{`, `function_call` on `(` (disjoint).
+    // PEG tries `map_projection` first; on a non-`{` follower it backtracks
+    // cleanly to `function_call` / `identifier`. A map projection is
+    // `<identifier>{...}` (identifier IMMEDIATELY before `{`) — DISTINCT
+    // from a bare `{...}` map literal (no leading identifier; matched inside
+    // `literal`). The node-pattern `property_map` (`(n {k:v})`) lives in
+    // PATTERN context and never reaches `primary_atom`, so there is no
+    // clash. openCypher v9 §3.5 `MapProjection` — NOT a `FunctionInvocation`.
+    | map_projection
+    | function_call
+    | "(" ~ where_expr ~ ")"
+    | identifier
+}
+// openCypher v9 §3.4 — postfix accessors on an atom: property access
+// (`.x`), list/string slice (`[lo..hi]`), and index (`[i]`). PEG
+// ordered choice: `slice_accessor` (which carries the `..`) MUST be
+// tried BEFORE `index_accessor`, else `[0..1]` would commit to
+// `index_accessor` as `[0]` and leave a dangling `..1`. `slice_lo` /
+// `slice_hi` are distinct named rules so the parser can identify which
+// bound is present in the open forms (`[..hi]`, `[lo..]`, `[..]`) —
+// position alone is ambiguous. Implicit `WHITESPACE` applies (these are
+// non-atomic), so `list [0]` / `[0 .. 1]` are admissible too.
+accessor = { property_accessor | slice_accessor | index_accessor }
+property_accessor = { "." ~ identifier }
+slice_accessor = { "[" ~ slice_lo? ~ ".." ~ slice_hi? ~ "]" }
+slice_lo = { expression }
+slice_hi = { expression }
+index_accessor = { "[" ~ expression ~ "]" }
+
+// ADR-188 Decision 2 — `all`/`any`/`none`/`single`(x IN list [WHERE p]).
+// The inner predicate uses `where_expr` (the full ladder INCLUDING
+// `special_pred`, so `all(x IN l WHERE x.v NEAR $q)` is admissible —
+// consistent with the parenthesized-subexpr precedent). The list uses
+// `expression`. openCypher's `FilterExpression` = `IdInColl [ WHERE
+// Expression ]`; the WHERE is grammar-optional but the binder/type-check
+// REQUIRE it for the four quantifiers (a bare `all(x IN l)` is a
+// semantic error — ADR-188 Decision 4 tables key on the predicate).
+filter_expr = {
+    ( kw_all | kw_any | kw_none | kw_single )
+    ~ "(" ~ identifier ~ kw_in ~ expression
+    ~ ( kw_where ~ where_expr )? ~ ")"
+}
+
+// ADR-188 Decision 2 — `reduce(acc = init, x IN list | expr)`. TWO
+// scoped vars (`acc` init-typed, `x` element-typed); the fold body
+// `expr` and the `init` use `expression`. openCypher's `Reduce` =
+// `reduce(Variable = Expression , IdInColl | Expression)`.
+reduce_expr = {
+    kw_reduce ~ "(" ~ identifier ~ "=" ~ expression
+    ~ "," ~ identifier ~ kw_in ~ expression
+    ~ "|" ~ expression ~ ")"
+}
+
+// ADR-188 (#620 list-half) Decision 5 — openCypher v9 §3.5 list
+// comprehension `[x IN list WHERE predicate | projection]`. The
+// iteration variable is an `identifier`; the list, the optional WHERE
+// `predicate`, and the optional `| projection` use `where_expr` /
+// `expression`. The WHERE predicate uses `where_expr` (the full ladder
+// INCLUDING `special_pred`, so `[x IN l WHERE x.v NEAR $q | x]` is
+// admissible — consistent with the `filter_expr` precedent). Both the
+// WHERE and the `| projection` are grammar-OPTIONAL (the four
+// openCypher §3.5 combinations: filter+map / filter-only / map-only /
+// identity). openCypher's `ListComprehension` =
+// `[ FilterExpression [ | Expression ] ]` where `FilterExpression` =
+// `IdInColl [ WHERE Expression ]`.
+list_comprehension = {
+    "[" ~ identifier ~ kw_in ~ expression
+    ~ ( kw_where ~ where_expr )? ~ ( "|" ~ expression )? ~ "]"
+}
+
+// ADR-191 D-6 (#620 map-half) — openCypher v9 §3.5 map projection
+// `n{.key, .other, alias: expr, .*}`. Builds a NEW map by selecting keys
+// from a node / relationship / map `base` (an `identifier`-named
+// variable). The base is an `identifier` — a `{` MUST immediately follow
+// (modulo human-readable whitespace; `map_projection` is non-atomic so
+// pest's implicit `WHITESPACE` admits `n {.k}`). openCypher v9's
+// `MapProjection = Variable '{' [ MapProjectionElements ] '}'` — the base
+// is a bound variable, NOT an arbitrary expression. An empty `n{}` is
+// admitted (a map projection with no items → the empty map), parallel to
+// the empty `{}` map literal.
+map_projection = {
+    identifier ~ "{"
+    ~ ( map_projection_item ~ ( "," ~ map_projection_item )* )?
+    ~ "}"
+}
+// A single projection element. PEG ordered choice:
+//   1. `all_properties_selector` (`.*`) FIRST — its `*` is not a valid
+//      `identifier` start, so `property_selector` would backtrack off
+//      `.*` anyway, but ordering `.*` first makes the commit explicit.
+//   2. `property_selector` (`.key`) — a `.`-led single-property include.
+//   3. `literal_entry` (`alias: expr`) LAST — opens with a BARE
+//      `identifier` (no leading `.`), disjoint from the two `.`-led
+//      selectors, so it only matches when neither selector did.
+map_projection_item = {
+      all_properties_selector
+    | property_selector
+    | literal_entry
+}
+// `.*` — include every property of the base. D-6 owns the per-element
+// null-handling: a `.key` selector DROPS a null/absent value; a
+// `literal_entry` KEEPS its key even when the value is null.
+all_properties_selector = { ".*" }
+property_selector = { "." ~ identifier }
+literal_entry = { identifier ~ ":" ~ expression }
+
+// CASE expression (openCypher v9 §3.6; #621). ONE production for BOTH forms:
+//   - SIMPLE:   `CASE <test> WHEN <v> THEN <r> [WHEN …]* [ELSE <d>] END`
+//   - SEARCHED: `CASE        WHEN <cond> THEN <r> [WHEN …]* [ELSE <d>] END`
+// The optional leading `<test>` expression is what distinguishes them: present
+// ⇒ simple (the parser folds it into `Expression::Case.test = Some(..)`),
+// absent ⇒ searched (`test = None`).
+//
+// THE `!kw_when` GUARD IS LOAD-BEARING. pest repetitions are POSSESSIVE (no
+// local backtracking once committed). With CASE/WHEN/… as SOFT keywords, a
+// bare `expression?` after `CASE` would GREEDILY parse the searched form's
+// leading `WHEN` token as an identifier (consuming it), then the
+// `(kw_when …)+` would find no WHEN and the whole production would fail with
+// no backtrack to give the `WHEN` back. The `( !kw_when ~ expression )?`
+// negative-lookahead admits the test ONLY when the next token is not `WHEN`
+// — so `CASE WHEN …` cleanly elides the test (searched), `CASE x WHEN …`
+// parses `x` (simple). Same idiom as `with_clause`'s `!( ^"FUSION" … )`.
+//
+// The WHEN-value / THEN-result / ELSE-default `expression`s need no guard:
+// WHEN/THEN/ELSE/END are not infix operators, so an `expression` already
+// holding its `primary_atom` stops cleanly at the next CASE keyword (the
+// add/comparison/AND/OR/XOR/IN/IS suffix-loops never match them). The `(…)+`
+// requires ≥1 WHEN…THEN; a CASE with no arms is a parse error (matches
+// openCypher — `CASE END` is invalid).
+case_expr = {
+    kw_case ~ ( !kw_when ~ expression )?
+    ~ ( kw_when ~ expression ~ kw_then ~ expression )+
+    ~ ( kw_else ~ expression )?
+    ~ kw_case_end
+}
+
+// `count(*)` (star_arg) + `count(DISTINCT x)` / `collect(DISTINCT x)`
+// (distinct_arg) per openCypher v9 §3 aggregation (#773 G4/G5 +
+// Customer-Zero AML rollups). The ordered choice tries `*` then
+// `DISTINCT <expr>` BEFORE the bare expression list, so `count(*)` /
+// `count(DISTINCT a.x)` commit to the aggregate-arg forms while
+// `count(x)` / `fn(a, b, c)` keep the existing expression-list path
+// unchanged. `*` is NOT an expression (it is the multiply operator), so
+// the star form MUST precede the list; `DISTINCT` is a reserved keyword
+// (`kw_distinct`), tried before the bare-expression branch so it cannot
+// be mis-parsed as an identifier-named argument. Semantic validity (`*`
+// only on `count`; `DISTINCT` only on aggregating functions) is enforced
+// at type-check — pest cannot gate on the identifier VALUE.
+function_call = {
+    identifier ~ "(" ~ ( star_arg | distinct_arg | ( expression ~ ("," ~ expression)* ) )? ~ ")"
+}
+// `count(*)` — counts ROWS (no expr argument). Distinct from the
+// projection `wildcard` rule (RETURN *) which carries different parse
+// handling; a dedicated rule keeps `parse_function_call` localized.
+star_arg = { "*" }
+// `count(DISTINCT x)` / `collect(DISTINCT x)` — deduplicate the
+// aggregated values before the fold (single expr; multi-arg DISTINCT is
+// not an openCypher form).
+distinct_arg = { kw_distinct ~ expression }
+
+field_ref = { identifier ~ ( "." ~ identifier )+ }
+
+// =====================================================================
+// 5. Literals + identifiers + parameters
+// =====================================================================
+
+literal = {
+      null_literal
+    | bool_literal
+    // Date/time, duration, and decimal constructor literals. Placed
+    // BEFORE the bare numeric literals
+    // so the parser commits to the constructor form when the input
+    // matches `datetime(...)` / `date(...)` / `duration(...)` /
+    // `decimal(...)` / `localdatetime(...)`. The constructor form's
+    // string argument is parsed in-grammar; the parser-side handler
+    // re-parses the string via arcgraph_core::datetime::parse_*.
+    | datetime_literal
+    | localdatetime_literal
+    | date_literal
+    | duration_literal
+    | decimal_literal
+    | float_literal
+    | int_literal
+    | string_literal
+    | list_literal
+    | map_literal
+}
+
+// W23-V11-T-01 — temporal + decimal constructor literals per
+// ADR-090 §"Wire shape" + ADR-038 amendment-09.
+//
+// Shape: `<kw>('<iso-string>')` where the inner string is the
+// canonical ISO-8601 / decimal-format text. ArcQL chose the
+// "function-shaped constructor" form (over a bareword literal) per
+// openCypher 9 §3.4's `datetime('2026-05-24T12:00:00Z')` shape and
+// Neo4j 5.x's `datetime("…")` shape — driver-side parity preserved.
+datetime_literal      = ${ kw_datetime      ~ ws_opt ~ "(" ~ ws_opt ~ string_literal ~ ws_opt ~ ")" }
+localdatetime_literal = ${ kw_localdatetime ~ ws_opt ~ "(" ~ ws_opt ~ string_literal ~ ws_opt ~ ")" }
+date_literal          = ${ kw_date_lit      ~ ws_opt ~ "(" ~ ws_opt ~ string_literal ~ ws_opt ~ ")" }
+duration_literal      = ${ kw_duration_lit  ~ ws_opt ~ "(" ~ ws_opt ~ string_literal ~ ws_opt ~ ")" }
+decimal_literal       = ${ kw_decimal_lit   ~ ws_opt ~ "(" ~ ws_opt ~ string_literal ~ ws_opt ~ ")" }
+
+null_literal = { kw_null }
+bool_literal = { kw_true | kw_false }
+
+// openCypher v9 §3 numeric literals (#618 GA Lane C; TCK
+// `expressions/literals/Literals2-5`). Both rules retain the optional
+// leading sign for the NON-expression grammar positions (`float_or_int`
+// fusion weights, `K = …`, `BUDGET = …`) where the token carries its own
+// sign; in expression position the unary `-`/`+` is consumed one level up
+// by `unary_expr`, so the sign branch is a harmless zero-width there.
+//
+// FLOAT — three ORDERED forms:
+//   1. `<digits>.<digits>` + optional exponent   (`1.5`, `1.5e3`)
+//   2. LEADING-DOT `.<digits>` + optional exponent (`.5`, `.1e-5`) — NEW
+//   3. exponent-only `<digits>E<exp>`             (`1e-5`)
+// The LEADING-DOT form (2) is openCypher §3 `.5` / `.1e-5`. It is
+// UNAMBIGUOUS against the `..` range/slice token and `.`-property access:
+// a leading-dot float is `.` IMMEDIATELY followed by an ASCII_DIGIT,
+// whereas `..` is `.`+`.` and property access is `.`+identifier — neither
+// begins with `.`+digit, so form (2) can never steal a `..` (slice
+// `[lo..hi]`) or a `.<ident>` accessor. Pinned by the `RETURN
+// [1,2,3][0..2]` + `RETURN n.prop` regression e2e. Placed AFTER form (1)
+// so `1.5` still commits to (1); (3) stays reachable because (2) requires
+// a leading `.` that `1e-5` lacks.
+float_literal = @{
+    ( "-" | "+" )? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ ~ ( ^"E" ~ ( "-" | "+" )? ~ ASCII_DIGIT+ )?
+  | ( "-" | "+" )? ~ "." ~ ASCII_DIGIT+ ~ ( ^"E" ~ ( "-" | "+" )? ~ ASCII_DIGIT+ )?
+  | ( "-" | "+" )? ~ ASCII_DIGIT+ ~ ^"E" ~ ( "-" | "+" )? ~ ASCII_DIGIT+
+}
+// INTEGER — decimal (default) + hexadecimal `0x…`/`0X…` + octal
+// `0o…`/`0O…`. The radix-prefixed alternatives are tried BEFORE the bare
+// decimal so the `0x`/`0o` prefix commits; a bare `0` / `00` (no `x`/`o`
+// follower) backtracks to the decimal `ASCII_DIGIT+` arm. Radix decoding +
+// the i64::MIN boundary (`-9223372036854775808` = `-0x8000000000000000` =
+// `-0o1000000000000000000000`, whose magnitude 2^63 overflows a positive
+// i64) are handled parser-side by `parse_radix_i64`; an over-range
+// hex/octal magnitude surfaces a clean parse error, never a panic.
+int_literal = @{ ( "-" | "+" )? ~ ( ^"0x" ~ ASCII_HEX_DIGIT+ | ^"0o" ~ ASCII_OCT_DIGIT+ | ASCII_DIGIT+ ) }
+
+string_literal = ${
+      "\"" ~ inner_dq ~ "\""
+    | "'"  ~ inner_sq ~ "'"
+}
+inner_dq = @{ ( escape_seq | (!"\"" ~ !"\\" ~ ANY) )* }
+inner_sq = @{ ( escape_seq | (!"'"  ~ !"\\" ~ ANY) )* }
+escape_seq = @{
+    "\\" ~ ( "\"" | "'" | "\\" | "/" | "n" | "r" | "t" | "0" | "b" | "f"
+           | "u" ~ ASCII_HEX_DIGIT{4} )
+}
+
+// ADR-152-amendment-02 (W28) — explicit `ws_opt` between elements so a
+// `List` literal parses with internal whitespace (`[1, 2, 3]`) even in
+// the COMPOUND-ATOMIC `property_map` / `prop_entry` context, where
+// pest's implicit `WHITESPACE` skipping is suppressed by the cascaded
+// atomicity. Without this, `CREATE (n {tags: [1, 2, 3]})` parse-failed
+// ("expected expr_not_expr") while the no-space `[1,2,3]` parsed — the
+// composite-`List`-in-property-bag whitespace gap the amendment closes
+// alongside the executor gate lift. `ws_opt` (space / tab) matches the
+// established `property_map` entry-whitespace posture (28 prior
+// usages); in non-atomic positions (`RETURN [1, 2]`, `SET = [1, 2]`)
+// the implicit `WHITESPACE` already handled it and the added `ws_opt`
+// is a harmless zero-width match. Recurses for nested lists.
+list_literal = {
+    "[" ~ ws_opt ~ ( expression ~ ws_opt ~ ("," ~ ws_opt ~ expression ~ ws_opt)* )? ~ "]"
+}
+map_literal = {
+    "{" ~ ( map_entry ~ ("," ~ map_entry)* )? ~ "}"
+}
+map_entry = { map_key ~ ":" ~ expression }
+
+// `map_key` — the property-key lexical class for EXPRESSION-context map
+// literals (`{null: 'Mats', NULL: 'Pontus'}`). Distinct from the
+// variable-position `identifier`: a map key is followed by a mandatory
+// `:`, so admitting reserved words here introduces ZERO clause-level
+// ambiguity (there is no `MATCH`-clause-vs-`MATCH`-key collision once the
+// `:` is required). This admits the Cypher 9 §2.4/§2.5 property-key class
+// (any identifier-shaped string, INCLUDING reserved words, without
+// backticks) PLUS the backtick-escape form — exactly what openCypher's
+// TCK `expressions/map/Map1[5]` + `Map2[5]` exercise via the
+// `{null: 'Mats', NULL: 'Pontus'}` literal (bare `null` lowercase parses
+// as an `identifier` today, but bare `NULL` uppercase is keyword-excluded
+// at `identifier` position).
+//
+// Scope note (ADR-038 amendment-04 §D-X.1 / issue #189): the v1.1
+// conformance follow-up #189 splits the POST-`.` property-key lexical
+// class (`n.MATCH` without backticks). This rule is the MAP-LITERAL-KEY
+// position only — a narrower, ambiguity-free context where the `:`
+// terminator removes the clause-collision hazard #189 has to solve. The
+// post-`.` property-accessor position is left UNCHANGED (still requires
+// backticks for reserved words), so this does not pre-empt #189.
+//
+// `identifier_inner` admits any identifier-shaped run (including
+// reserved-word spellings); the `backtick_ident` alternative is tried
+// FIRST so a backtick-escaped key with spaces/punctuation still wins.
+map_key = @{ backtick_ident | identifier_inner }
+
+parameter = ${ "$" ~ identifier_inner }
+
+// `identifier` admits openCypher idents (alpha + underscore +
+// digits, leading non-digit). Two shapes:
+//
+//   1. Backtick-escaped form (Cypher canonical escape hatch) —
+//      ``identifier``. Anything except a literal `` ` `` is admitted
+//      inside the backticks, including spaces, punctuation, and
+//      characters that would otherwise collide with reserved
+//      keywords. The parser handler strips the surrounding
+//      backticks and uses the inner bytes verbatim as the
+//      identifier text. No AST-level mark is needed — backticks are
+//      a parser-internal escape; the resulting `Identifier(String)`
+//      / property-name token is identical to what an unescaped form
+//      would produce.
+//
+//   2. Bare form — `!keyword ~ identifier_inner`. Excludes
+//      reserved keywords (the ratified set spelled out in
+//      `keyword` below). The `keyword` rule is intentionally
+//      CASE-SENSITIVE on the uppercase form (see Fix A.2 below);
+//      this admits Cypher-convention lowercase property names
+//      (`n.match`, `n.order`, `n.return`, …) at v1.0 without
+//      introducing a clause-level case-insensitivity regression.
+//
+// Pseudo-keywords like VECTOR, TEXT, COMMUNITY, etc. are NOT in
+// the `keyword` set so they remain admissible as property names.
+//
+// `backtick_ident` REJECTS embedded `\n`, `\r`, `\0` (codex M4-01
+// retro F-03, 2026-05-03), as well as the Unicode line-terminators
+// U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) — both
+// are real line terminators in JS / JSON contexts (ECMA-262 §11.3,
+// JSON.parse rejects them inside strings prior to ES2019), and
+// admitting them inside identifier text creates the same FFI /
+// log-line / catalog-key corruption hazard as `\n`. Without these
+// exclusions, `` n.`a\nb` `` admitted an identifier containing a
+// literal newline, and `` n.`a\0b` `` admitted a NUL byte. Cypher
+// 9 §2.4 also specifies a backtick-DOUBLING escape (`` n.`foo``bar`
+// `` → identifier text `foo`bar`); ArcQL does not yet implement
+// doubling — see issue #191 for the v1.1 follow-up.
+identifier        = @{ backtick_ident | ( !keyword ~ identifier_inner ) }
+backtick_ident    = ${ "`" ~ ( !"`" ~ !"\n" ~ !"\r" ~ !"\0" ~ !"\u{2028}" ~ !"\u{2029}" ~ ANY )+ ~ "`" }
+identifier_inner  = @{ ( ASCII_ALPHA | "_" ) ~ ( ASCII_ALPHANUMERIC | "_" )* }
+
+// Reserved-keyword set for identifier exclusion.
+//
+// **Case-sensitivity (Fix A.2 / PR #154 reviewer Finding 1).** PEG's
+// `^"…"` is case-INSENSITIVE — using `^"MATCH"` here would have
+// rejected the lowercase property name `n.match` (the parser would
+// see `match` at identifier position, find that `^"MATCH"` matches
+// case-insensitively, and refuse to admit `match` as an
+// identifier). Cypher convention is UPPERCASE keywords + lowercase
+// property names, so case-insensitive exclusion at identifier
+// position broke a load-bearing parity claim with Neo4j's
+// openCypher accept set.
+//
+// Mitigation: we use bare `"…"` (case-sensitive uppercase) here
+// for identifier exclusion. The clause-leading `kw_match` /
+// `kw_where` / etc. productions retain their `^"…"` (case-
+// insensitive) form so that `MATCH (n)` and `match (n)` both still
+// parse at clause level. Net effect:
+//   - `n.match` (lowercase) → keyword rule does NOT match → bare
+//     `match` is admitted as an identifier.  ✓
+//   - `n.MATCH` (uppercase) → keyword rule matches → bare `MATCH`
+//     is rejected as an identifier; users escape via backtick:
+//     `` n.`MATCH` ``.  ✓
+//   - `MATCH (n)` (clause leading) → `kw_match` matches case-
+//     insensitively → clause parses.  ✓
+//
+// Pseudo-keywords (VECTOR, TEXT, COMMUNITY, …) remain excluded
+// from this set so that `n.text` / `n.vector` / `n.community`
+// continue to parse as property accesses.
+keyword = @{
+    (
+          "MATCH"          | "WHERE"        | "RETURN"
+        | "WITH"           | "UNWIND"       | "AS"
+        | "DISTINCT"       | "ORDER"        | "BY"
+        | "ASC"            | "DESC"         | "LIMIT"
+        | "SKIP"           | "AND"          | "OR"
+        | "NOT"            | "IN"           | "IS"
+        | "NULL"           | "TRUE"         | "FALSE"
+        | "FOR"            | "ALL"          | "NEAR"
+        | "RANK"
+        | "DEFINE"         | "OPTIONAL"
+        // EXPLAIN / PROFILE per ADR-038 §2 D-19 + amendment-03
+        // §TIER-1 GAP B (M4-91). Case-sensitive uppercase exclusion
+        // (matches the convention above). Lowercase property names
+        // (`n.explain`, `n.profile`) remain admissible because
+        // case-sensitive matching here only rejects the uppercase
+        // form at identifier position.
+        | "EXPLAIN"        | "PROFILE"
+        // CREATE per ADR-147 (W26-θ Phase 1). Same case-sensitive
+        // uppercase exclusion — `n.create` lowercase property name
+        // remains admissible.
+        | "CREATE"
+        // DELETE + DETACH per ADR-149 (W26-θ Phase 3). Same
+        // case-sensitive uppercase exclusion — `n.delete` /
+        // `n.detach` lowercase property names remain admissible.
+        | "DELETE"         | "DETACH"
+        // SET + REMOVE per ADR-150 (W26-θ Phase 4). Same
+        // case-sensitive uppercase exclusion — `n.set` /
+        // `n.remove` lowercase property names remain admissible.
+        | "SET"            | "REMOVE"
+        // MERGE per ADR-151 (W26-θ Phase 5). Same case-sensitive
+        // uppercase exclusion — `n.merge` lowercase property name
+        // remains admissible.
+        | "MERGE"
+        // UNION per ADR-185 (#649-A1, W28 — openCypher v9 §8). Same
+        // case-sensitive uppercase exclusion — `n.union` lowercase
+        // property name remains admissible. (`ALL` is intentionally
+        // NOT in this set — it is a pseudo-keyword shared with the
+        // `FOR ... ALL` temporal predicate, so `n.all` must keep
+        // parsing as a property name.)
+        | "UNION"
+        // CALL { … } subquery per ADR-192 (#623 — Cypher 25, beyond
+        // openCypher v9). Same case-sensitive uppercase exclusion —
+        // `n.call` lowercase property name remains admissible.
+        | "CALL"
+        // YIELD + SHOW per ADR-197 (#802) — schema-introspection
+        // procedure calls (`CALL apoc.meta.data(...) YIELD ...`) +
+        // SHOW commands (`SHOW CONSTRAINTS`) the langchain-neo4j driver
+        // sends. Same case-sensitive uppercase exclusion — `n.yield` /
+        // `n.show` lowercase property names remain admissible.
+        | "YIELD"          | "SHOW"
+        // XOR boolean operator per openCypher v9 §boolean (#621). Same
+        // case-sensitive uppercase exclusion as AND/OR — `n.xor`
+        // lowercase property name remains admissible (parity with
+        // `n.and` / `n.or`).
+        | "XOR"
+        // STARTS / ENDS / CONTAINS string-comparison operators per
+        // openCypher v9 §3.3.6 (#773). Same case-sensitive uppercase
+        // exclusion as NEAR/IN/IS — lowercase `n.starts` / `n.ends` /
+        // `n.contains` property names remain admissible. (`WITH` — the
+        // second keyword of `STARTS WITH` / `ENDS WITH` — is already
+        // excluded above as the clause keyword.)
+        | "STARTS"         | "ENDS"         | "CONTAINS"
+    ) ~ !( ASCII_ALPHANUMERIC | "_" )
+}
+
+// =====================================================================
+// 6. Index DDL
+// =====================================================================
+
+// Statement-level DDL. The three alternatives have DISJOINT
+// first-tokens (DEFINE / CREATE / DROP) so PEG ordered-choice commits
+// unambiguously; a plain `CREATE (n:Label …)` graph write fails
+// `create_vector_index_ddl` at the second token (`kw_vector`) and
+// `ddl_statement` as a whole, so `statement` backtracks to
+ddl_statement = {
+      create_vector_index_ddl
+    | create_property_index_ddl
+    | drop_index_ddl
+}
+
+// ----- CREATE / DROP VECTOR INDEX DDL (#830 · ADR-198 §OQ-7) ---------
+//
+// Neo4j-compatible vector-index DDL emitted by vector clients. Grammar
+// + bind ONLY at this layer:
+// the index BUILD/lifecycle is the vector track's follow-up
+// (ADR-198 §OQ-7) — the type-checker surfaces a typed `NotImplemented`
+// (parsed-but-not-built), NOT a parse error / panic / silent-empty.
+//
+// CREATE form matches the common client wire shape:
+// `CREATE VECTOR INDEX $name
+// {IF NOT EXISTS} FOR (n:Label) ON n.embedding OPTIONS { indexConfig:
+// { `vector.dimensions`: toInteger($dimensions),
+// `vector.similarity_function`: $similarity_fn } }`. Note: the index
+// NAME is a `$param` in the real client (also admits a literal name);
+// the property is `ON n.prop` WITHOUT parens (the real wire form) —
+// the parenthesized `ON (n.prop)` Neo4j-docs form is also admitted.
+// OPTIONS reuses `map_literal` (backtick-escaped keys + nested map +
+// function-call/parameter values all already supported).
+create_vector_index_ddl = {
+    kw_create ~ kw_vector ~ kw_index ~ index_name ~ if_not_exists?
+    ~ kw_for ~ "(" ~ index_pattern_var ~ ":" ~ index_label ~ ")"
+    ~ kw_on ~ index_property
+    ~ ( kw_options ~ map_literal )?
+}
+
+// ----- CREATE PROPERTY INDEX DDL (#1366, task #248 — Phase 1) --------
+//
+// The user-visible secondary node-property index DDL:
+//   CREATE INDEX <name> [IF NOT EXISTS] FOR (var:Label) ON (var.prop)
+// (`docs/design/property-index-design.md` §Maintenance). Distinct from
+// `create_vector_index_ddl` at the SECOND token (`kw_vector` vs
+// `kw_index` directly), so the PEG ordered-choice in `ddl_statement`
+// commits unambiguously: a `CREATE INDEX …` (no `VECTOR`) fails the
+// vector rule at `kw_vector` and matches here. No OPTIONS clause (the
+// property index has no build config at Phase 1). The property form
+// admits both `ON var.prop` and the parenthesized `ON (var.prop)`
+// (index_property already covers both).
+create_property_index_ddl = {
+    kw_create ~ kw_index ~ index_name ~ if_not_exists?
+    ~ kw_for ~ "(" ~ index_pattern_var ~ ":" ~ index_label ~ ")"
+    ~ kw_on ~ index_property
+}
+
+// DROP form matches the generic Neo4j drop emitted by compatible
+// clients: `DROP INDEX $name IF EXISTS`. Neo4j has no
+// `DROP VECTOR INDEX` form — this
+// generic drop-by-name covers vector AND property indexes
+// (cite-correctness: we implement the form the client sends, not an
+// invented one).
+drop_index_ddl = { kw_drop ~ kw_index ~ index_name ~ if_exists? }
+
+index_name        = { parameter | identifier }
+index_pattern_var = { identifier }
+index_label       = { identifier }
+// `ON n.prop` (real client) or `ON (n.prop)` (Neo4j-docs form).
+index_property    = { ( "(" ~ field_ref ~ ")" ) | field_ref }
+if_not_exists     = { kw_if ~ kw_not ~ kw_exists }
+if_exists         = { kw_if ~ kw_exists }

@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# W25-OPS-PROD — Grafana dashboard auto-provisioning.
+#
+# Loads every .json file under `deploy/grafana/dashboards/` into the
+# "ArcGraph" folder on Grafana startup. Bind-mount via:
+#
+#   docker-compose.yml (repo root):
+#     grafana:
+#       volumes:
+#         - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+#         - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards/arcgraph:ro
+#
+# Per ADR-093-amendment-01 §D-1: 4 dashboards ship at v1.0-GA covering
+# query latency, WAL throughput, buffer pool, and per-tenant cost
+# telemetry.
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: 1
+
+providers:
+  - name: ArcGraph
+    orgId: 1
+    folder: ArcGraph
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/arcgraph
+      foldersFromFilesStructure: false

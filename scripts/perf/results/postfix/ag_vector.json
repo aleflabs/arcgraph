@@ -1,0 +1,117 @@
+{
+  "addr": "127.0.0.1:7687",
+  "n": 5000,
+  "dim": 128,
+  "k": 10,
+  "seed": 765,
+  "surface": "CALL db.index.vector.queryNodes (Bolt, un-throttled)",
+  "duration_s": 15.0,
+  "warmup_s": 3.0,
+  "smoke": {
+    "served": true,
+    "rows": 10,
+    "top_vids": [
+      0,
+      2696,
+      3853,
+      1373,
+      1803,
+      513,
+      556,
+      3036,
+      1609,
+      2728
+    ],
+    "self_is_rank1": true,
+    "error": null
+  },
+  "recall": {
+    "queries": 200,
+    "k": 10,
+    "recall_at_k": 0.995,
+    "min_q": 0.9,
+    "perfect_q": 190,
+    "examples": [
+      "q5: exact=[849, 1066, 1219, 1413, 1737, 2712, 2959, 4075, 4149, 4151] got=[788, 849, 1066, 1219, 1413, 1737, 2712, 4075, 4149, 4151]",
+      "q8: exact=[943, 1497, 1629, 2642, 2816, 3754, 3935, 4154, 4801, 4930] got=[943, 1338, 1497, 1629, 2642, 2816, 3754, 3935, 4801, 4930]",
+      "q17: exact=[806, 1610, 2661, 2895, 3065, 3078, 3315, 3373, 3932, 3985] got=[806, 1610, 1939, 2661, 2895, 3065, 3078, 3373, 3932, 3985]"
+    ]
+  },
+  "levels": [
+    {
+      "concurrency": 1,
+      "duration_s": 15.003,
+      "completed": 3989,
+      "errors": 0,
+      "rps": 265.9,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 3.743,
+        "p95": 4.017,
+        "p99": 4.159,
+        "max": 21.128,
+        "mean": 3.759
+      }
+    },
+    {
+      "concurrency": 2,
+      "duration_s": 15.003,
+      "completed": 7492,
+      "errors": 0,
+      "rps": 499.4,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 3.934,
+        "p95": 4.434,
+        "p99": 4.756,
+        "max": 19.899,
+        "mean": 4.003
+      }
+    },
+    {
+      "concurrency": 4,
+      "duration_s": 15.004,
+      "completed": 8082,
+      "errors": 0,
+      "rps": 538.7,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 6.988,
+        "p95": 11.442,
+        "p99": 14.184,
+        "max": 30.007,
+        "mean": 7.422
+      }
+    },
+    {
+      "concurrency": 8,
+      "duration_s": 15.008,
+      "completed": 7097,
+      "errors": 0,
+      "rps": 472.9,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 16.132,
+        "p95": 27.025,
+        "p99": 33.048,
+        "max": 46.73,
+        "mean": 16.908
+      }
+    },
+    {
+      "concurrency": 16,
+      "duration_s": 15.014,
+      "completed": 6886,
+      "errors": 0,
+      "rps": 458.6,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 33.527,
+        "p95": 56.036,
+        "p99": 67.531,
+        "max": 112.952,
+        "mean": 34.837
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "tier": "1M",
+  "engine": "arcgraph",
+  "nodes": 1000000,
+  "secs": 156.9,
+  "nodes_per_s": 6373,
+  "secs_note": "secs recorded at 0.1s precision (harness log: '1000000 nodes in 156.9s'). nodes_per_s = round(1000000/156.9) = 6373 (was 6372 pre-NIT-1 — a rounding inconsistency: 156.9*6372=999.5k, not 1e6). The reported figure is ~6.4k/s either way.",
+  "loader": "UNWIND batches over mcp-stdio",
+  "provenance": "measured @ecc7c235 on the OCI VM, 40G/12c cgroup"
+}

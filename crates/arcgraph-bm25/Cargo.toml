@@ -1,0 +1,73 @@
+[package]
+name = "arcgraph-bm25"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "BM25 text search via Tantivy. v1.0 commitment per ADR-036 D-2 and ADR-039."
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+arcgraph-core.workspace = true
+arcgraph-storage.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+# Downstream `cargo add arcgraph` consumers do not inherit this workspace's
+# Cargo.lock. Keep Tantivy's `tantivy-common 0.11.0` on the last compatible
+# time line; `time 0.3.48` introduces a coherence conflict in FileSlice.
+time = ">=0.3.0, <0.3.48"
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+# MIT OR Apache-2.0 — ADR-compatible (Prime Directive #1). Used ONLY
+# by the M3.b 1 M-doc bench (`benches/bm25_search.rs`) for the
+# deterministic-seeded synthetic corpus generator. Matches the
+# arcgraph-vector dev-dep version + feature set so the workspace
+# resolution remains stable; `std_rng` provides `StdRng`
+# (ChaCha20-based, seeded via `seed_from_u64`) — the bench needs
+# nothing beyond seeded uniform sampling for word/length selection.
+rand = { version = "0.10.1", default-features = false, features = ["alloc", "std", "std_rng"] }
+# #1266 — the BEIR BM25-alone IR driver (`benches/beir_bm25_run.rs`) parses
+# `corpus.jsonl` / `queries.jsonl` line-by-line and writes an optional JSON
+# stats sidecar. Workspace-pinned `serde_json = "1"` (Apache-2.0 OR MIT per
+# `cargo info serde_json`; already a workspace direct dep for arcgraph-mcp).
+serde_json.workspace = true
+
+# ADR-039 §"Performance budget" + ADR-036 §D-24 — validates the
+# v1.0 BM25 top-10 P95 ≤ 20 ms gate at 1 M docs (ADR-035 amendment-04
+# §D-3 / §D-4 commit-message-ratification precedent). The 100 M-doc
+# bench is correctly deferred to scale-validation issue #76.
+[[bench]]
+name = "bm25_search"
+harness = false
+
+# ADR-039 amendment-02 §D-12 + §D-15 — empirical envelope for the
+# M3.b-heap-policy slice (issue #198). Measures cold/warm/evicted-
+# rewrite per-tenant writer-allocation latency and pool-exhaustion
+# tail latency under N concurrent commit threads; closes
+# OPEN-Q-2 on per-tenant Mutex contention.
+[[bench]]
+name = "m3b_heap_policy"
+harness = false
+
+# #1266 — BEIR BM25-alone IR driver. Reads a downloaded BEIR dataset
+# (`corpus.jsonl` + `queries.jsonl`; NOT vendored, dependency and artifact policy), indexes
+# through the crate-direct BM25 surface (mirrors `bm25_search.rs`), runs each
+# query, and emits a standard TREC run file for external evaluation.
+# BM25-only driver.
+# `harness = false` (plain `main()`, one pass over the corpus, no Criterion
+# resampling). NEVER run in CI — opt-in via BEIR_CORPUS / BEIR_QUERIES env
+# vars.
+[[bench]]
+name = "beir_bm25_run"
+harness = false

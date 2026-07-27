@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Grafana datasource provisioning (W15β M6-03 / docker-compose).
+#
+# Auto-wires the ArcGraph Prometheus instance as the default datasource
+# when the grafana stanza in `docker-compose.yml` is uncommented. The
+# `./deploy/grafana/provisioning` directory is bind-mounted into the
+# grafana container at `/etc/grafana/provisioning`.
+#
+# Dashboard JSON lands in W15δ M6-07 (sister PR #307); this file pins
+# the datasource shape so the M6-07 dashboards can resolve their
+# Prometheus refs once the stanzas are uncommented.
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # `prometheus` is the docker-compose service name; container DNS
+    # resolves it within the `arcgraph-net` bridge network.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

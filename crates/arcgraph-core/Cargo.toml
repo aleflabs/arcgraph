@@ -1,0 +1,70 @@
+[package]
+name = "arcgraph-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Shared primitives, types, and errors for ArcGraph. No I/O."
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+bytes.workspace = true
+serde.workspace = true
+# W25-OPS-PROD: parking_lot::RwLock for the per-tenant cost registry
+# (cost_telemetry module). Workspace-pinned at 0.12; Apache-2.0 OR MIT.
+parking_lot.workspace = true
+# W20β-3: drop-zeroizing key material for `SecretValue` so freed
+# AES-256 keys do not linger in the freed heap. Apache-2.0 OR MIT.
+zeroize.workspace = true
+# W20β-3: structured tracing for the EnvSecretsProvider unsafe-for-prod
+# startup warning. `tracing` is in the workspace deps already (used by
+# every other crate); promoting here lets arcgraph-core emit the
+# startup warning without forcing every downstream library to wire its
+# own warning path.
+tracing.workspace = true
+
+# W20β-3 optional dep: OS-keyring-backed `SecretsProvider`. Default
+# OFF so headless CI / build environments without Secret Service +
+# D-Bus build arcgraph-core without a system dep. The CLI binary
+# (arcgraph-cli) opts the feature ON for production deployments.
+keyring = { workspace = true, optional = true, features = [
+    "apple-native",
+    "windows-native",
+    "linux-native-async-persistent",
+    "async-io",
+    # CI fix: the Linux secret-service backend (pulled by
+    # linux-native-async-persistent + async-io) requires a crypto provider
+    # to be selected, else `cargo build --all-features` on Linux fails with
+    # compile_error!("Please enable a feature to pick a runtime ..."). The
+    # `crypto-rust` provider is pure-Rust (RustCrypto, Apache-2.0/MIT) —
+    # avoids an OpenSSL system dep and satisfies Prime Directive #1.
+    "crypto-rust",
+] }
+
+[features]
+default = []
+# W20β-3: enables `arcgraph-core::secrets::OsKeyringProvider` (macOS
+# Keychain / Windows Credential Manager / Linux Secret Service). Opt-in
+# at the binary surface — keep `arcgraph-core` library tests
+# feature-OFF so they run without D-Bus.
+os-keyring = ["dep:keyring"]
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+serde_json.workspace = true
+# W20β-3 / ADR-052 / PR #373 R1 M-1: pin the `EnvSecretsProvider`
+# startup `tracing::warn!` with `unsafe_for_prod = true` via the
+# `#[traced_test]` macro from `tracing-test`. MIT licensed (verified
+# against `tracing-test 0.2.6` Cargo.toml; entry on deny.toml's allow
+# list). Already present transitively via `arcgraph-query`'s dev-deps
+# (see `crates/arcgraph-query/Cargo.toml`); promoting here adds zero
+# new transitive surface. `no-env-filter` lets the per-test subscriber
+# capture warnings from `arcgraph-core::secrets::env` without the
+# default env-filter scoping them out.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }

@@ -1,0 +1,1 @@
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a.age < b.age AND b.age < c.age RETURN a, b, c

@@ -1,0 +1,1 @@
+MATCH (n:Person) RETURN n LIMIT 5; MATCH (m:Company) RETURN m LIMIT 5;

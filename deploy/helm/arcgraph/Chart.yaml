@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ArcGraph Helm chart — v1.0-GA.
+#
+# Per ADR-093-amendment-01 §D-4: production-ready Helm chart for
+# Kubernetes deployments. Forward-supersedes the raw manifests under
+# `deploy/k8s/` (which remain as a kustomize-friendly reference).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v2
+name: arcgraph
+description: ArcGraph — Apache-2.0 graph, vector, full-text, and traversal database engine with MCP access.
+type: application
+# Chart version tracks the Helm chart shape — bump on template/value
+# changes even when appVersion is unchanged.
+version: 0.1.0
+# Tracks the ArcGraph release; pinned to v1.0-alpha at chart debut.
+# Upgrades to v1.0-GA flip this without necessarily bumping the chart
+# version unless the values schema changes.
+appVersion: "v1.0-alpha"
+home: https://github.com/aleflabs/arcgraph
+sources:
+  - https://github.com/aleflabs/arcgraph
+keywords:
+  - graph
+  - vector
+  - database
+  - mcp
+maintainers:
+  - name: ArcGraph project
+    url: https://github.com/aleflabs/arcgraph
+icon: https://raw.githubusercontent.com/aleflabs/arcgraph/main/.github/assets/icon.png
+kubeVersion: ">=1.26.0-0"
+# No subcharts at v1.0-GA. Prometheus + Grafana are deliberately
+# operator-side concerns; bundling them here would force a single
+# observability stack on operators with existing infrastructure.
+dependencies: []
+annotations:
+  # https://artifacthub.io/docs/topics/repositories/helm-charts/
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial v1.0-GA Helm chart (W25-OPS-PROD / ADR-093-amendment-01).
+  artifacthub.io/containsSecurityUpdates: "false"

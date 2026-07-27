@@ -1,0 +1,137 @@
+# #1404 heaptrack attribution — top allocators by PEAK consumption (heaptrack_print -p) — SANITIZED
+# Host: OCI VM. ArcGraph @ecc7c235, UNSTRIPPED debug binary. WAL-enabled ingest, ~50k nodes (10x5000-batch).
+#
+# HEADLINE: the dominant PER-NODE resident term is BlobStore blob-page chunks — ~8.2 KB/node,
+# allocated at StagedBlob::page_bytes (blob.rs:316-317) on the create_node ingest path,
+# retained resident in BlobStore.pages. 5000 calls / 40.96 MB = exactly 1 per node in a 5000-batch.
+# NOT MVCC version chains, NOT idempotency_bindings, NOT the WAL channel (queue=0, see probe_1404_channel_depth.log).
+#
+## TOTAL: 321587 calls to allocation functions with 264.08M peak consumption from
+
+## --- peak block ---
+20373 calls to allocation functions with 43.86M peak consumption from
+_RNvXNtNtNtCs3JBboNF8E1m_3std3sys5alloc4unixNtNtB8_5alloc6SystemNtNtNtCs3BFokC4QLxY_4core5alloc6global11GlobalAlloc12alloc_zeroed
+  at <rustc>/library/std/src/sys/alloc/unix.rs:36
+  in <mcp-stdio>
+_RNvCs4SDFJOLwvtW_7___rustc18___rdl_alloc_zeroed
+  at <rustc>/library/std/src/alloc.rs:487
+_RNvNtCs8y6E41fb8tc_5alloc5alloc5alloc
+  at <rustc>/library/alloc/src/alloc.rs:101
+_RNvMNtCs8y6E41fb8tc_5alloc5allocNtB2_6Global18alloc_impl_runtime
+  at <rustc>/library/alloc/src/alloc.rs:210
+_RNvMNtCs8y6E41fb8tc_5alloc5allocNtB2_6Global10alloc_impl
+  at <rustc>/library/alloc/src/alloc.rs:332
+_RNvXs_NtCs8y6E41fb8tc_5alloc5allocNtB4_6GlobalNtNtCs3BFokC4QLxY_4core5alloc9Allocator8allocate
+  at <rustc>/library/alloc/src/alloc.rs:449
+_RNvNtCs8y6E41fb8tc_5alloc5boxed14box_new_uninit
+  at <rustc>/library/alloc/src/boxed.rs:248
+alloc::boxed::Box$LT$T$GT$::new::h2833034cfd1145a7
+  at <rustc>/library/alloc/src/boxed.rs:286
+arcgraph_storage::buffer::Frame::new::h2411b2a6de18d361
+  at crates/arcgraph-storage/src/buffer.rs:55
+arcgraph_storage::buffer::BufferPool::with_split::h0ca27564ece6178f
+  at crates/arcgraph-storage/src/buffer.rs:499
+9998 calls with 0B peak consumption from:
+    arcgraph_storage::blob::BlobStore::iter_pages::_$u7b$$u7b$closure$u7d$$u7d$::h560f8284edeeff7f
+      at crates/arcgraph-storage/src/blob.rs:341
+      in <mcp-stdio>
+    core::ops::function::impls::_$LT$impl$u20$core..ops..function..FnOnce$LT$A$GT$$u20$for$u20$$RF$mut$u20$F$GT$::call_once::h17fee0ba834d1075
+      at <rustc>/library/core/src/ops/function.rs:310
+    core::option::Option$LT$T$GT$::map::haa446add719d58ae
+      at <rustc>/library/core/src/option.rs:1165
+
+## --- peak block ---
+5000 calls with 40.96M peak consumption from:
+    arcgraph_storage::blob::StagedBlob::page_bytes::_$u7b$$u7b$closure$u7d$$u7d$::h45ef7391ef1c700b
+      at crates/arcgraph-storage/src/blob.rs:316
+      in <mcp-stdio>
+    core::iter::adapters::map::map_fold::_$u7b$$u7b$closure$u7d$$u7d$::h210e134d0e1367f3
+      at <rustc>/library/core/src/iter/adapters/map.rs:88
+    _$LT$core..slice..iter..Iter$LT$T$GT$$u20$as$u20$core..iter..traits..iterator..Iterator$GT$::fold::h49176cd24af7c9b2
+      at <rustc>/library/core/src/slice/iter/macros.rs:279
+    _$LT$core..iter..adapters..map..Map$LT$I$C$F$GT$$u20$as$u20$core..iter..traits..iterator..Iterator$GT$::fold::hd14bbe60596b57a1
+      at <rustc>/library/core/src/iter/adapters/map.rs:128
+    core::iter::traits::iterator::Iterator::for_each::h834a8bff6ffcc685
+      at <rustc>/library/core/src/iter/traits/iterator.rs:889
+    alloc::vec::Vec$LT$T$C$A$GT$::extend_trusted::h9eeb75172e7408e8
+      at <rustc>/library/alloc/src/vec/mod.rs:4027
+    _$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$alloc..vec..spec_extend..SpecExtend$LT$T$C$I$GT$$GT$::spec_extend::h45b0a65af094257e
+      at <rustc>/library/alloc/src/vec/spec_extend.rs:27
+    _$LT$alloc..vec..Vec$LT$T$GT$$u20$as$u20$alloc..vec..spec_from_iter_nested..SpecFromIterNested$LT$T$C$I$GT$$GT$::from_iter::h5305a7f747140aa4
+      at <rustc>/library/alloc/src/vec/spec_from_iter_nested.rs:60
+    _$LT$alloc..vec..Vec$LT$T$GT$$u20$as$u20$alloc..vec..spec_from_iter..SpecFromIter$LT$T$C$I$GT$$GT$::from_iter::ha9f22344a9865a54
+      at <rustc>/library/alloc/src/vec/spec_from_iter.rs:33
+    _$LT$alloc..vec..Vec$LT$T$GT$$u20$as$u20$core..iter..traits..collect..FromIterator$LT$T$GT$$GT$::from_iter::ha36b398127580fff
+      at <rustc>/library/alloc/src/vec/mod.rs:3891
+    core::iter::traits::iterator::Iterator::collect::h24ac02567994b9c9
+      at <rustc>/library/core/src/iter/traits/iterator.rs:2092
+    arcgraph_storage::blob::StagedBlob::page_bytes::h36cc17bc4d2a08f8
+      at crates/arcgraph-storage/src/blob.rs:317
+    arcgraph_storage::blob::BlobStore::put_and_stage::h1609487008840062
+      at crates/arcgraph-storage/src/blob.rs:505
+    arcgraph_storage::crud::PropertyData::apply_to_node::h9ce37d77c78fc92f
+      at crates/arcgraph-storage/src/crud.rs:251
+
+## --- peak block ---
+43.86M peak memory consumed over 20373 calls from
+_RNvXNtNtNtCs3JBboNF8E1m_3std3sys5alloc4unixNtNtB8_5alloc6SystemNtNtNtCs3BFokC4QLxY_4core5alloc6global11GlobalAlloc12alloc_zeroed
+  at <rustc>/library/std/src/sys/alloc/unix.rs:36
+  in <mcp-stdio>
+_RNvCs4SDFJOLwvtW_7___rustc18___rdl_alloc_zeroed
+  at <rustc>/library/std/src/alloc.rs:487
+_RNvNtCs8y6E41fb8tc_5alloc5alloc5alloc
+  at <rustc>/library/alloc/src/alloc.rs:101
+_RNvMNtCs8y6E41fb8tc_5alloc5allocNtB2_6Global18alloc_impl_runtime
+  at <rustc>/library/alloc/src/alloc.rs:210
+_RNvMNtCs8y6E41fb8tc_5alloc5allocNtB2_6Global10alloc_impl
+  at <rustc>/library/alloc/src/alloc.rs:332
+_RNvXs_NtCs8y6E41fb8tc_5alloc5allocNtB4_6GlobalNtNtCs3BFokC4QLxY_4core5alloc9Allocator8allocate
+  at <rustc>/library/alloc/src/alloc.rs:449
+_RNvNtCs8y6E41fb8tc_5alloc5boxed14box_new_uninit
+  at <rustc>/library/alloc/src/boxed.rs:248
+alloc::boxed::Box$LT$T$GT$::new::h2833034cfd1145a7
+  at <rustc>/library/alloc/src/boxed.rs:286
+arcgraph_storage::buffer::Frame::new::h2411b2a6de18d361
+  at crates/arcgraph-storage/src/buffer.rs:55
+arcgraph_storage::buffer::BufferPool::with_split::h0ca27564ece6178f
+  at crates/arcgraph-storage/src/buffer.rs:499
+40.96M consumed over 5000 calls from:
+    arcgraph_storage::blob::StagedBlob::page_bytes::_$u7b$$u7b$closure$u7d$$u7d$::h45ef7391ef1c700b
+      at crates/arcgraph-storage/src/blob.rs:316
+      in <mcp-stdio>
+    core::iter::adapters::map::map_fold::_$u7b$$u7b$closure$u7d$$u7d$::h210e134d0e1367f3
+      at <rustc>/library/core/src/iter/adapters/map.rs:88
+    _$LT$core..slice..iter..Iter$LT$T$GT$$u20$as$u20$core..iter..traits..iterator..Iterator$GT$::fold::h49176cd24af7c9b2
+      at <rustc>/library/core/src/slice/iter/macros.rs:279
+
+## --- peak block ---
+40.96M consumed over 5000 calls from:
+    arcgraph_storage::blob::StagedBlob::page_bytes::_$u7b$$u7b$closure$u7d$$u7d$::h45ef7391ef1c700b
+      at crates/arcgraph-storage/src/blob.rs:316
+      in <mcp-stdio>
+    core::iter::adapters::map::map_fold::_$u7b$$u7b$closure$u7d$$u7d$::h210e134d0e1367f3
+      at <rustc>/library/core/src/iter/adapters/map.rs:88
+    _$LT$core..slice..iter..Iter$LT$T$GT$$u20$as$u20$core..iter..traits..iterator..Iterator$GT$::fold::h49176cd24af7c9b2
+      at <rustc>/library/core/src/slice/iter/macros.rs:279
+    _$LT$core..iter..adapters..map..Map$LT$I$C$F$GT$$u20$as$u20$core..iter..traits..iterator..Iterator$GT$::fold::hd14bbe60596b57a1
+      at <rustc>/library/core/src/iter/adapters/map.rs:128
+    core::iter::traits::iterator::Iterator::for_each::h834a8bff6ffcc685
+      at <rustc>/library/core/src/iter/traits/iterator.rs:889
+    alloc::vec::Vec$LT$T$C$A$GT$::extend_trusted::h9eeb75172e7408e8
+      at <rustc>/library/alloc/src/vec/mod.rs:4027
+    _$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$alloc..vec..spec_extend..SpecExtend$LT$T$C$I$GT$$GT$::spec_extend::h45b0a65af094257e
+      at <rustc>/library/alloc/src/vec/spec_extend.rs:27
+    _$LT$alloc..vec..Vec$LT$T$GT$$u20$as$u20$alloc..vec..spec_from_iter_nested..SpecFromIterNested$LT$T$C$I$GT$$GT$::from_iter::h5305a7f747140aa4
+      at <rustc>/library/alloc/src/vec/spec_from_iter_nested.rs:60
+    _$LT$alloc..vec..Vec$LT$T$GT$$u20$as$u20$alloc..vec..spec_from_iter..SpecFromIter$LT$T$C$I$GT$$GT$::from_iter::ha9f22344a9865a54
+      at <rustc>/library/alloc/src/vec/spec_from_iter.rs:33
+    _$LT$alloc..vec..Vec$LT$T$GT$$u20$as$u20$core..iter..traits..collect..FromIterator$LT$T$GT$$GT$::from_iter::ha36b398127580fff
+      at <rustc>/library/alloc/src/vec/mod.rs:3891
+    core::iter::traits::iterator::Iterator::collect::h24ac02567994b9c9
+      at <rustc>/library/core/src/iter/traits/iterator.rs:2092
+    arcgraph_storage::blob::StagedBlob::page_bytes::h36cc17bc4d2a08f8
+      at crates/arcgraph-storage/src/blob.rs:317
+    arcgraph_storage::blob::BlobStore::put_and_stage::h1609487008840062
+      at crates/arcgraph-storage/src/blob.rs:505
+    arcgraph_storage::crud::PropertyData::apply_to_node::h9ce37d77c78fc92f
+      at crates/arcgraph-storage/src/crud.rs:251

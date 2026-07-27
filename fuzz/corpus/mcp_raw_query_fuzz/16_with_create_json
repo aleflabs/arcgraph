@@ -1,0 +1,1 @@
+MATCH (n) WITH n CREATE (m:Log) RETURN m

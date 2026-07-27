@@ -1,0 +1,202 @@
+[package]
+name = "arcgraph-query"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "ArcQL parser, planner, and vectorized executor for ArcGraph."
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+# M4-01 was parser-only — no `arcgraph-core` / `arcgraph-storage` /
+# `arcgraph-index` types are referenced yet. M4-21 (M4-02a) adds
+# `arcgraph-core` for the schema-ID newtypes (`LabelId`, `TypeId`,
+# `PropertyId`, `TenantId`, `PartitionId`, `Lsn`) consumed by the
+# `semantic::catalog::CatalogProvider` trait + `BoundQuery`'s
+# reserved `snapshot_lsn` field per amendment-03 §TIER-1 GAP E.
+# Subsequent slices (M4-22+) keep this dep and add `arcgraph-storage`
+# only when the executor side needs CRUD / scan handles.
+arcgraph-core.workspace = true
+# M6.2 OOC-2: SortOp consumes storage's OOC-1 scratch-run API. Storage
+# deliberately remains unaware of executor Values, so this edge points
+# query -> storage and the query crate owns row serialization.
+arcgraph-storage.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Apache-2.0-OR-MIT per `deny.toml` allow-list; already present in the
+# workspace. Used by the M4-53 plan cache's per-tenant LRU sharding
+# (`crates/arcgraph-query/src/planner/cache`); per-tenant `Arc<Mutex<…>>`
+# keyed by `TenantId` so cross-tenant eviction never touches another
+# tenant's entries (per ADR-038 amendment-03 §TIER-2-a).
+dashmap.workspace = true
+# Apache-2.0-OR-MIT (pinned to workspace version). Per-tenant LRU lock;
+# the cache uses parking_lot's poisoning-free Mutex so a panic during
+# one lookup never taints subsequent lookups (the cache is a soft-state
+# accelerator — there's no invariant that lock-poisoning would protect).
+parking_lot.workspace = true
+# MIT — `lru-rs`. Verified via `~/.cargo/registry/src/.../lru-0.16.4/Cargo.toml`
+# `license = "MIT"`, allowed by `deny.toml`. Already present in the
+# Cargo.lock as a transitive dep of `tantivy`; promoted to a direct
+# dep here for the M4-53 per-tenant plan cache. Standard intrusive
+# linked-list LRU; chosen over a hand-roll because (a) zero new
+# transitive deps (tantivy already pins it) and (b) the API matches
+# the `peek_mut` / `pop_lru` pattern the per-tenant LRU needs.
+lru = "0.16"
+# Apache-2.0 OR MIT (workspace-pinned). Used by the M4-61 executor
+# `ExecutionContext::query_id` for UUIDv7 time-ordered identifiers
+# (per ADR-038 amendment-02 §M4.f + amendment-03 §TIER-1 GAP E /
+# §M5↔M4 contract surface). Diagnostic value: `query_id` flows
+# through `tracing` spans (slow-query log, EXPLAIN/PROFILE
+# correlation, future M4-71 row-count observer feedback loop) and
+# the v7 timestamp prefix lets ops sort identifiers by issue time
+# without a wall-clock side-channel.
+uuid.workspace = true
+# MIT OR Apache-2.0 — verified via `cargo info pest` 2026-04-30; both
+# license slots permitted by `deny.toml`. ADR-006 D-1 pins `pest` PEG
+# (no ANTLR, no hand-written recursive descent); ADR-038 §2 D-1
+# reaffirms. Pinned to 2.8.x — matches `pest_derive` (the derive macro
+# must track the runtime crate version).
+pest = "2.8"
+pest_derive = "2.8"
+# Apache-2.0 OR MIT (workspace-pinned). Used by the W13β M4-81 slice's
+# `Value` ↔ `serde_json::Value` bridge (`Value::to_json_value` /
+# `Value::try_from_json_value`) per ADR-038 amendment-02 §M4.h "TOON
+# + JSON serialization for MCP". The bridge lets the W11ε arcgraph-mcp
+# serializers (TOON / YAML) consume `MaterializedResult` rows without
+# a per-format converter. The pivot through `serde_json::Value` is the
+# same lattice TOON / YAML / JSON normalize onto, so the bridge is
+# format-agnostic.
+serde.workspace = true
+serde_json.workspace = true
+# Apache-2.0 OR MIT — already a workspace dep (root `Cargo.toml` `rayon = "1"`,
+# verified against `deny.toml` allow-list per Prime Directive #1; present
+# transitively via tantivy + promoted as a direct dep for arcgraph-storage).
+# Consumed by the ADR-226 §4 S4 CONC-D `executor::ops::parallel_scan`
+# morsel-driven parallel scan operator (Leis et al. SIGMOD 2014,
+# "Morsel-Driven Parallelism"): the scan buffer splits into ~64K-record
+# morsels dispatched to a DEDICATED rayon `ThreadPool` sized `cores − 4`
+# (env `ARCGRAPH_SCAN_POOL_THREADS`) — NOT the global pool, so it does
+# not contend with the async reactor's work-stealing pool.
+rayon.workspace = true
+
+[features]
+# Deterministic OOC-2 probes plus OOC-1's bounded retained-run hook.
+# Off by default; the dedicated release fault-injection lane enables it.
+fault-injection = ["arcgraph-storage/fault-injection"]
+
+[dev-dependencies]
+proptest.workspace = true
+# M4-2x codex retro Sin #1: SelectivityEstimator regression bench
+# (`benches/selectivity_estimator.rs`). Workspace-wide Criterion
+# version reused.
+criterion.workspace = true
+# MIT — verified against `tracing-test 0.2.6` and
+# `tracing-test-macro 0.2.6` Cargo.toml manifests. MIT is in
+# `deny.toml` allow list. Used by the M4-53 cache tracing-event
+# firing pin (`crates/arcgraph-query/src/planner/cache/mod.rs`
+# `cache_emits_4_tracing_events`) per W10b debt-closure §Sin #6
+# closure. Limited to dev-deps so production builds carry zero
+# additional transitive deps.
+#
+# `no-env-filter` — W11Z fix-up LOW-3 (PR #268 retro): the default
+# env-filter scopes to the test crate, so spans/events from
+# `arcgraph_query::*` (e.g., the executor's `tracing::info_span!`)
+# are filtered out of integration tests. The
+# `executor_tracing_span_carries_query_identity` test
+# (`tests/m4_61_executor_integration.rs`) needs the executor span
+# enabled to assert its declared field set. The feature flips the
+# subscriber's filter to `trace` for ALL crates within the test, which
+# is the appropriate scope for a span-shape pin.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
+# Criterion bench for SelectivityEstimator per-call latency. Per
+# testing strategy ("Every public performance-sensitive API has a
+# benchmark") and codex M4-2x retro Sin #1 — the M4-05 cost planner
+# is the load-bearing consumer; bench establishes baseline so future
+# stats-redesign regressions >2× are caught.
+[[bench]]
+name = "selectivity_estimator"
+harness = false
+
+# Criterion bench for the ADR-147-amendment-03 (D-1) UNWIND-ingest lever:
+# end-to-end `UNWIND $rows AS r CREATE (n {…: r.…})` swept over batch size,
+# measuring the O(N)→O(1) per-statement parse/plan/dispatch amortization.
+# Numbers are the parse/dispatch-elimination contribution only (stub
+# substrate; no durable commit) — the "51×"/"47K/s" figures are projections.
+[[bench]]
+name = "d1_unwind_create_ingest"
+harness = false
+
+# Criterion bench for M4-52 DP join-ordering enumeration time vs
+# join-width. Per ADR-036 §D-25 the M4-05 plan-build budget is 5 ms
+# end-to-end; M4-52 must stay within its share at N ∈ {2..=8}. Per
+# the M4-52 spawn-prompt empirical-gauntlet acceptance criterion +
+# testing strategy.
+[[bench]]
+name = "m4_52_dp_enumeration"
+harness = false
+
+# Criterion bench for the M4-53 plan cache capacity sweep + K-tenant
+# scaling + invalidation storm. Per ADR-037 multi-tenant memory
+# budget the cache must stay ≤ 2 GB at K=1000 × capacity=1024 × measured
+# per-entry byte-size; the bench prints the per-entry byte size + the
+# K=1000 ceiling for the review packet's empirical section.
+[[bench]]
+name = "plan_cache_capacity_sweep"
+harness = false
+
+# W13α / M4-64b — SIMD vs scalar hot-path speedup bench. Per
+# ADR-038 amendment-02 §M4.f + amendment-03 §Structural-1 the
+# acceptance gate is **≥1.5× speedup vs scalar** on each of
+# FilterOp / ExpandOp / RrfFusion. Three benches × (scalar vs SIMD)
+# × (1K, 10K, 100K rows). The runtime SIMD-backend dispatcher selects
+# AVX2 / NEON / scalar at function entry; the bench's intrinsic-side
+# call is the same call the operator's hot path uses.
+[[bench]]
+name = "simd_hot_path_speedup"
+harness = false
+
+# M4-84 LDBC SNB Interactive-Short benches per design-v2 §10.5 +
+# LDBC SNB Interactive Specification §3.5. Each bench measures the
+# plan-build pipeline (parse + bind + typecheck + cross-substrate +
+# lower + DP enumerate + cost walker + PlanTree render) for a single
+# IS query against the SF-0.0001 stub catalog (10 Persons / ~50
+# Comments). Full-execute LDBC perf gating is forward-deferred to
+# M4-64 (`LogicalJoin` executor support) + M6 LDBC perf milestone
+# (real SF-1.0/10/30 datasets per the LDBC SNB driver contract).
+# The shared LDBC schema + query bank lives at
+# `tests/common/ldbc_fixture.rs`; each bench `#[path]`-includes it.
+[[bench]]
+name = "ldbc_is1"
+harness = false
+[[bench]]
+name = "ldbc_is2"
+harness = false
+[[bench]]
+name = "ldbc_is3"
+harness = false
+[[bench]]
+name = "ldbc_is4"
+harness = false
+[[bench]]
+name = "ldbc_is5"
+harness = false
+[[bench]]
+name = "ldbc_is6"
+harness = false
+[[bench]]
+name = "ldbc_is7"
+harness = false
+
+# ADR-188 / #687 — list-predicate (all/any/none/single) + reduce
+# evaluator over a 1k-element list. Per ADR-188 Decision 1 §BoE +
+# §Open-questions "Bench" + testing strategy: the per-element extended-row
+# synthesis mechanism adds no asymptotic overhead over the inner-predicate
+# cost and does NO per-element heap allocation in the scalar case;
+# >10% regression vs this baseline blocks merge.
+[[bench]]
+name = "list_predicate_eval"
+harness = false

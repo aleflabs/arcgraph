@@ -1,0 +1,74 @@
+[package]
+name = "arcgraph-vector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Vector index engine for ArcGraph: HNSW + DiskANN, simsimd-backed kernels, per-tenant arena."
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+arcgraph-core.workspace = true
+arcgraph-storage.workspace = true
+bytemuck.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+# MIT OR Apache-2.0 — ADR-compatible. ADR-195 §3 / F.5 (#112): the
+# bounded SSD-resident DiskANN build parallelises the Vamana refinement
+# pass (batched read-only greedy+prune over a snapshot, sequential apply)
+# so the 10M GA-gate validation is iterable (single-thread @100K×768 ≈
+# 481s → hours @10M×768 otherwise). Only the rayon parallel-iterator
+# surface is used; no thread-pool config.
+rayon.workspace = true
+# MIT OR Apache-2.0 — ADR-compatible. Used by Slice C for the
+# stochastic HNSW layer assignment (`floor(-ln(uniform()) * mL)`
+# per Malkov & Yashunin TPAMI 2018 §4 algorithm 1) and for
+# property-test reseeding. Default features off; only `std_rng`
+# (StdRng / ChaCha20-based) is required — the small_rng /
+# thread_rng paths are not part of the hot-path level assignment.
+rand = { version = "0.10.1", default-features = false, features = ["alloc", "std", "std_rng"] }
+serde.workspace = true
+simsimd.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+serde_json.workspace = true
+# Phase 5.5 (M3.a) — `iv_invariants.rs` cross-cutting tests use
+# `TempDir` for snapshot-flush byte-validation against the
+# arcgraph-storage SnapshotCatalog (I-V2 / I-V5 / I-V6 fixtures).
+tempfile.workspace = true
+
+# Slice B distance-kernel speedup bench. Validates the ADR-035 D-2
+# ≥ 2.5× simsimd-vs-scalar uplift acceptance criterion.
+[[bench]]
+name = "distance"
+harness = false
+
+# ADR-035 amendment-03 (issue #127). Validates that the
+# canonical-Filter → DiskANN dispatch overhead is < 1 % of the
+# surrounding filtered-search cost.
+[[bench]]
+name = "filter_dispatch"
+harness = false
+
+# ADR-035 amendment-04 (Phase 6 F.4 dispatcher). Validates that
+# the cross-backend variant-based routing decision is < 1 % of
+# the surrounding filtered-search hot path. Reference floor is
+# the prior PR #132 `filter_dispatch_supported_variants_alternating`
+# bench at ~543 ps for the variant-match alone.
+[[bench]]
+name = "dispatcher"
+harness = false
+
+# RaBitQ asymmetric query hot-loop bench. Compares the legacy scalar
+# sign-dot loop against the runtime-dispatched AVX2+FMA estimator.
+[[bench]]
+name = "rabitq_kernel"
+harness = false

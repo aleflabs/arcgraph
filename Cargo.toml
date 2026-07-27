@@ -1,0 +1,382 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/arcgraph",
+    "crates/arcgraph-core",
+    "crates/arcgraph-community",
+    "crates/arcgraph-storage",
+    "crates/arcgraph-index",
+    "crates/arcgraph-vector",
+    "crates/arcgraph-bm25",
+    "crates/arcgraph-graph-traversal",
+    "crates/arcgraph-query",
+    "crates/arcgraph-mcp",
+    "crates/arcgraph-cli",
+    "crates/arcgraph-test-harness",
+    "crates/arcgraph-tck",
+]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0-beta"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["ArcGraph contributors"]
+repository = "https://github.com/aleflabs/arcgraph"
+readme = "README.md"
+description = "A graph, vector, full-text, and MCP database engine"
+keywords = ["graph", "database", "vector", "mcp", "rust"]
+categories = ["database-implementations"]
+
+[workspace.dependencies]
+arcgraph = { path = "crates/arcgraph", version = "0.1.0-beta" }
+arcgraph-core = { path = "crates/arcgraph-core", version = "0.1.0-beta" }
+arcgraph-community = { path = "crates/arcgraph-community", version = "0.1.0-beta" }
+arcgraph-storage = { path = "crates/arcgraph-storage", version = "0.1.0-beta" }
+arcgraph-index = { path = "crates/arcgraph-index", version = "0.1.0-beta" }
+arcgraph-vector = { path = "crates/arcgraph-vector", version = "0.1.0-beta" }
+arcgraph-bm25 = { path = "crates/arcgraph-bm25", version = "0.1.0-beta" }
+arcgraph-graph-traversal = { path = "crates/arcgraph-graph-traversal", version = "0.1.0-beta" }
+arcgraph-query = { path = "crates/arcgraph-query", version = "0.1.0-beta" }
+arcgraph-mcp = { path = "crates/arcgraph-mcp", version = "0.1.0-beta" }
+
+thiserror = "1"
+tracing = "0.1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+anyhow = "1"
+dashmap = "6"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+crc32c = "0.6"
+# MIT OR Apache-2.0 — ADR-compatible per Prime Directive #1 (both license
+# slots are in `deny.toml`'s allow list). Already vendored transitively
+# (pulled by tokio/monoio/etc.; present in `Cargo.lock` at 0.2.x), so
+# promoting it to a direct workspace dep adds ZERO net new transitive
+# surface. Sole use at v1.0: the std-only durable `--data` inter-process
+# advisory lock (`flock(2)` `LOCK_EX|LOCK_NB`) in
+# `arcgraph-cli::data_lock` (#886) — a contained `unsafe` FFI call with a
+# `// SAFETY:` block (Prime Directive #3). Consumed ONLY on unix (windows
+# uses std `share_mode(0)`, no FFI), so `arcgraph-cli` pulls it under a
+# `[target.'cfg(unix)'.dependencies]` gate.
+libc = "0.2"
+tempfile = "3"
+crossbeam-channel = "0.5"
+# MIT OR Apache-2.0 — ADR-compatible. Inline-storage optimization
+# for small-N collections (e.g., ADR-033 TxnMutationLog smallvecs).
+smallvec = "1.15"
+# Apache-2.0 OR MIT — verified per `cargo info uuid` 2026-05-10; both
+# license slots permitted by `deny.toml`. Already vendored by tantivy
+# (transitively); promoted to a direct workspace dep for the M4-61
+# `ExecutionContext::query_id` UUIDv7 (time-ordered, monotone-ish per
+# `draft-ietf-uuidrev-rfc4122bis` §6.6 — diagnostic-friendly across
+# multi-tenant deployments). The `v7` feature pulls in `getrandom` v0.4
+# (already in lock as a transitive dep) — zero net new transitive deps.
+uuid = { version = "1", features = ["v7"] }
+# Apache-2.0 OR MIT OR Zlib — ADR-compatible. Zero-copy slice
+# casting for vector arena byte ↔ typed views (M3.a / ADR-035).
+bytemuck = "1"
+# Apache-2.0 — verified under the workspace Apache-2.0 licensing policy and
+# ADR-035 D-2. Provides SIMD-accelerated distance kernels (L2,
+# IP, cosine, hamming) across f32/f16/i8/u8/bf16 with runtime
+# AVX2/AVX-512/NEON dispatch. Base implementation plan referenced
+# "0.x" but the published crate is at 6.x; this addendum is the
+# locked v1.0 version.
+simsimd = "6"
+# MIT OR Apache-2.0 — ADR-039 §"Context" + Prime Directive #1.
+# Lucene-shape full-text search engine; v1.0 BM25 backend per
+# ADR-036 §D-2 and ADR-039. Adopted under the Apache-2.0 dual-license
+# arm. mmap is read-side only — storage ownership policy ("no
+# mmap on hot path") is preserved because the storage hot path
+# (PageStore, WAL, MVCC) is unchanged. Empirically, top-10 over 1M
+# docs runs 5-15 ms on a single core (Tantivy 0.21+ release notes),
+# inside the 20 ms ADR-036 §D-24 budget.
+tantivy = "0.26"
+# MIT OR Apache-2.0 — ADR-compatible per Prime Directive #1; verified
+# `cargo metadata` license field. Data-parallel iterator with bounded
+# work-stealing thread pool (sized by `num_cpus` by default). Used by
+# the M4-41 cold-start `rebuild_all_tenant_stats` parallel driver
+# (issue #247; ADR-038 amendment-06 §D-25.2 multi-tenant scaling
+# paragraph: "one rebuild thread per tenant; bounded by
+# `min(num_tenants, num_cpus)`"). Already present transitively via
+# tantivy; promoted to a direct workspace dep for the storage crate.
+rayon = "1"
+# MIT OR Apache-2.0 — ADR-compatible per Prime Directive #1 (verified
+# `cargo info serde_json` license field). Direct dep for `arcgraph-mcp`
+# W11ε M5-09 TOON serializer: `serde_json::Value` is the canonical IR
+# the TOON encoder/decoder pivots through (any `T: Serialize` is
+# converted to `Value` first; the encoder's roundtrip oracle compares
+# `Value`-equality). Already present in `Cargo.lock` via tantivy and
+# tracing-test transitive deps; promoted to direct workspace dep here
+# so `arcgraph-mcp` carries no new transitive surface.
+serde_json = "1"
+# MIT OR Apache-2.0 — ADR-compatible per Prime Directive #1 (verified
+# `cargo info serde_yaml` license field; `0.9.34+deprecated` retains
+# the dual-license, the `+deprecated` build-metadata simply marks
+# upstream maintenance status). Direct dep for `arcgraph-mcp` W11ε
+# M5-10 YAML serializer: thin Serde-wrapper exposing `to_yaml` /
+# `from_yaml`. Selected per spawn prompt §M5-10. The `+deprecated`
+# tag does not signal a security or correctness risk — the crate is
+# still on the 1.0 trajectory and is the dominant Serde↔YAML bridge
+# (`reqwest`, `kube`, `octocrab` all pin it). Future migration to a
+# maintained fork (e.g., `serde_norway`) is non-breaking — the wrapper
+# encapsulates the dep so call-sites remain stable.
+serde_yaml = "0.9"
+# Apache-2.0 OR ISC OR MIT — verified per `cargo info rustls 0.23.40`
+# license field 2026-05-10 against deny.toml's `licenses.allow` list.
+# Direct dep for `arcgraph-mcp` W13ε M5-02 hot-reload TLS resolver
+# implementing the `ResolvesServerCert` trait (server-side cert
+# selection callback). Default features (`aws_lc_rs` + `logging` +
+# `prefer-post-quantum` + `std` + `tls12`) selected: aws-lc-rs is the
+# vendored crypto provider used by `aws_lc_rs::sign::any_supported_type`
+# in `validation.rs` for parsing PKCS#8 / PKCS#1 private keys. Per
+# Prime Directive #1, aws-lc-rs's transitive license `ISC AND
+# (Apache-2.0 OR ISC)` is permitted (both ISC and Apache-2.0 on the
+# allowlist). The "ring" feature is intentionally NOT enabled because
+# its OpenSSL license clause is non-allowlisted.
+rustls = "0.23"
+# Apache-2.0 OR MIT — verified per `cargo info rustls-pki-types 1.14.1`
+# license field 2026-05-10. Shared cert / key DER newtypes
+# (`CertificateDer`, `PrivateKeyDer`) the rustls + webpki ecosystem
+# agrees on as the canonical pre-validation form. Direct dep so the
+# public API of `arcgraph-mcp::tls` can return / accept these types
+# without re-exporting through `rustls`. Since 1.9.0 this crate also
+# carries the `pem::PemObject` trait — we use it for cert + private-key
+# PEM parsing instead of the now-unmaintained `rustls-pemfile`
+# (RUSTSEC-2025-0134, archived August 2025; latest rustls-pemfile 2.2
+# is itself a thin wrapper around this same code). Migration was
+# mechanical, single direct dep removed.
+rustls-pki-types = "1"
+# Apache-2.0 OR MIT — verified per `cargo info arc-swap 1.9.1` license
+# field 2026-05-10. Lock-free `Arc<T>` swap used by W13ε M5-02
+# `HotReloadResolver` for the `Arc<CertifiedKey>` rotation. Read path
+# (TLS handshake's `resolve()` callback) hits `ArcSwap::load_full()`
+# every accept; write path (SIGHUP-driven reload) hits
+# `ArcSwap::store()`. Per arc-swap docs the read path is wait-free at
+# the cost of one atomic-load + one Arc-clone — acceptable on the TLS
+# accept hot path where handshake cost dominates by 1000×.
+arc-swap = "1"
+# Apache-2.0 OR MIT — verified per `cargo info x509-parser 0.18.1`
+# license field 2026-05-10. Pure-Rust X.509 v3 parser used by W13ε
+# M5-02 `validation.rs` to extract the end-entity cert's `not_before`
+# / `not_after` validity window + SubjectAltName extension for
+# pre-swap expiry + hostname checks. rustls itself does NOT expose
+# parsed X.509 fields (its surface is the wire-level handshake), so a
+# raw DER parser is needed. x509-parser is the rusticata-maintained
+# Apache-2.0/MIT option — `rcgen` (test dep below) emits certs
+# compatible with this parser.
+x509-parser = "0.18"
+# Apache-2.0 OR MIT — verified per `cargo info tokio 1.52.3` license
+# field 2026-05-10. Async runtime + signal-handling primitives shared
+# by both W13δ M5-01 (stdio MCP transport: `io-std` + `io-util` +
+# `macros` + `rt`/`rt-multi-thread` + `signal` SIGTERM handler) and
+# W13ε M5-02 (TLS hot-reload: `signal` SIGHUP loop, `sync` watch-channel
+# shutdown). Workspace entry pins the version + `default-features =
+# false` policy (per design-v2 §4.1: Tokio is the non-hot-path agent
+# runtime; Monoio is reserved for the executor + storage hot path).
+# Per-crate feature unions are selected at the call-site (see
+# `crates/arcgraph-mcp/Cargo.toml` for the merged feature list).
+# Already transitively pinned by tantivy + tracing-test; promotion to
+# a direct workspace dep adds zero net new transitive surface.
+tokio = { version = "1", default-features = false }
+# MIT — verified per `cargo info hyper 1.9.0` license field 2026-05-11
+# (Apache-allowlisted via deny.toml `MIT` entry). Direct dep for W14α
+# M5-03 HTTP/TLS transport: hyper 1.x's `service_fn` + `http1::Builder`
+# is used as the request-dispatch substrate over a `tokio_rustls::TlsAcceptor`-
+# wrapped TCP listener. Selected over `axum` per the spawn prompt:
+# axum's tower-stack and middleware abstractions are more surface than
+# the Tier-1 MCP-over-HTTPS endpoint needs (one POST /mcp + one GET
+# /healthz route); hyper-direct gives explicit control over the
+# accept loop, per-connection TLS handshake, and per-request
+# CancellationToken plumbing. The `server` feature includes both
+# `http1` (the only HTTP version v1.0-alpha needs — agents speak
+# request/response, not Server-Sent Events / push) and `http2` (which
+# we feature-gate OFF to keep the dep surface minimal). The
+# `default-features = false` + explicit `["server", "http1"]` selection
+# is the minimal feature subset.
+hyper = { version = "1", default-features = false, features = ["server", "http1", "client"] }
+# MIT — verified per `cargo info hyper-util 0.1.20` license field
+# 2026-05-11. The `tokio` adapter (TokioIo) bridges hyper's
+# `hyper::rt::{Read,Write}` traits to tokio's `AsyncRead`/`AsyncWrite`
+# without a per-connection wrapper allocation. Without `hyper-util`
+# we'd reimplement the adapter inline; the crate exists specifically
+# to avoid that duplication. Selected feature: `tokio`.
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "client", "client-legacy", "http1"] }
+# MIT — verified per `cargo info http-body-util 0.1.3` license field
+# 2026-05-11. The `BodyExt::collect` adapter consumes a `hyper::body::Incoming`
+# stream into a single `Bytes` buffer respecting a Content-Length cap;
+# `Full<Bytes>` produces a one-shot response body. Both are the canonical
+# request/response body shapes for hyper 1.x's stream-based body model.
+http-body-util = { version = "0.1", default-features = false }
+# MIT OR Apache-2.0 — verified per `cargo info tokio-rustls 0.26.4`
+# license field 2026-05-11. Async TLS handshake adapter — wraps a
+# `tokio::net::TcpStream` into a `tokio_rustls::server::TlsStream`
+# whose `Read`/`Write` impls feed the hyper service. Configured with
+# the `HotReloadResolver` from W13ε so cert rotation is live across
+# new connections. `default-features = true` pulls in `aws_lc_rs` to
+# match the workspace's chosen rustls crypto provider (Prime
+# Directive #1 — no `ring` cycle).
+tokio-rustls = "0.26"
+# Apache-2.0 — verified per `cargo info prometheus 0.14.0` license
+# field 2026-05-11 against deny.toml's `licenses.allow` list (line 11).
+# Direct dep for W15γ M6-06 `/metrics` Prometheus exporter implementing
+# design-v2 §10.2 (Observability). Provides the `IntCounterVec`,
+# `HistogramVec`, `IntGaugeVec` types + the `TextEncoder` that emits
+# Prometheus text-format on `/metrics` scrape. `default-features = false`
+# strips the optional `protobuf` feature (we only emit text format —
+# Prometheus 2.x dropped protobuf-format scrape support in favor of
+# OpenMetrics text per https://prometheus.io/docs/instrumenting/exposition_formats/);
+# transitive deps with this config are: `cfg-if`, `fnv`, `lazy_static`,
+# `memchr`, `parking_lot`, `thiserror` — all MIT/Apache-2.0 verified
+# against deny.toml. The `process` feature is NOT enabled — the
+# v1.0-alpha exporter exposes app-level metrics only; process-level
+# (procfs) metrics are forward-pin to M6-07 Grafana wiring.
+prometheus = { version = "0.14", default-features = false }
+# MIT OR Apache-2.0 — verified per `cargo info clap 4.6.1` license
+# field 2026-05-11; both license slots permitted by `deny.toml`.
+# Direct dep for the W15α M6-02 `arcgraph` umbrella CLI binary.
+# Already vendored transitively via `criterion` (benches) and
+# `cucumber` (TCK harness) — promoting to a direct workspace dep
+# adds ZERO net new transitive surface (verified against `Cargo.lock`
+# 2026-05-11). The `derive` feature gates the `#[derive(Parser)]` /
+# `#[derive(Subcommand)]` macros the CLI binary depends on.
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"] }
+# MIT — verified per `cargo info jsonwebtoken 10.3.0` license field
+# 2026-05-15; permitted by deny.toml's `MIT` allow entry. Direct dep
+# for W16β M5-03 OAuth 2.1 + PKCE Bearer-token verification: encodes /
+# decodes JWTs against an operator-staged JWK Set (RFC 7515 / 7517 /
+# 7519). The `default` (= `use_pem`) gets us PKCS#8 / PKCS#1 / SPKI
+# PEM parsing; `aws-lc-rs` selects the same crypto backend rustls
+# uses (workspace Apache-2.0 licensing policy — `ring`'s OpenSSL clause is
+# allow-listed only for the `ring` crate itself, NOT for sibling
+# crates that link to it; aws-lc-rs is Apache-2.0 OR ISC, both on
+# the allow-list). The `rust_crypto` composite feature is NOT
+# enabled — pulling in ed25519-dalek + hmac + p256 + p384 + rsa +
+# sha2 + rand would add ~7 transitive deps for a backend that
+# duplicates aws-lc-rs's capabilities.
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }
+# Apache-2.0 OR MIT — verified per `cargo info base64 0.22.1` license
+# field 2026-05-15. Direct dep for W16β M5-03 OAuth PKCE
+# `code_challenge` derivation per RFC 7636 §4.2
+# (`BASE64URL-ENCODE(SHA256(ASCII(code_verifier)))`). Already
+# vendored transitively via rustls + jsonwebtoken; promoted to a
+# direct workspace dep so the OAuth surface is non-fragile against
+# indirect-dep churn.
+base64 = "0.22"
+# Apache-2.0 OR MIT — verified per `cargo info rand 0.10.1` license
+# field 2026-05-15. Direct dep for W16β M5-03 OAuth PKCE
+# `code_verifier` generation per RFC 7636 §4.1 (43-128 chars from
+# the unreserved `[A-Za-z0-9-._~]` set). Selects 0.10.x to align
+# with the newer rand already transitive across the workspace.
+rand = "0.10"
+# Apache-2.0 OR MIT — verified per `cargo info sha2 0.10.9` license
+# field 2026-05-15. Direct dep for W16β M5-03 OAuth PKCE
+# `code_challenge` derivation per RFC 7636 §4.2 (SHA-256 of
+# `code_verifier`). Already vendored transitively; promoted to a
+# direct workspace dep.
+sha2 = "0.10"
+# Apache-2.0 OR ISC — verified per `cargo info aws-lc-rs 1.16.3` license
+# field 2026-05-17 against deny.toml's `licenses.allow` list. Already
+# vendored transitively via rustls + jsonwebtoken; promoting to a
+# direct workspace dep adds ZERO net new transitive surface. Used by
+# `arcgraph-storage::encryption` (W20β-3 AES-256-GCM WAL + page
+# encryption) — `aws_lc_rs::aead::AES_256_GCM` is the canonical
+# FIPS-140-3 candidate AEAD. The `rust_crypto` (RustCrypto-backed)
+# alternative is NOT enabled — we use the aws-lc-rs path directly so
+# we ride the same crypto provider as rustls 0.23 + jsonwebtoken 10.x.
+aws-lc-rs = "1"
+# Apache-2.0 OR MIT — verified per `cargo info zeroize 1.x` license
+# field 2026-05-17. Drop-zeroizes secret bytes for the W20β-3
+# `arcgraph-core::secrets::SecretValue` newtype. Already in `Cargo.lock`
+# transitively via rustls + jsonwebtoken; promoting to a direct
+# workspace dep is zero-cost. The `zeroize_derive` feature enables
+# `#[derive(Zeroize)]` so explicit `impl Zeroize` boilerplate is not
+# needed at every key-bearing struct.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+# Apache-2.0 OR MIT — verified per `cargo info keyring 3.x` license
+# field 2026-05-17. Cross-platform OS keyring abstraction
+# (macOS Keychain via Security framework, Windows Credential Manager
+# via wincred, Linux Secret Service via libsecret/D-Bus). Used by
+# `arcgraph-core::secrets::OsKeyringProvider`; feature-gated behind
+# `arcgraph-core/os-keyring` so headless CI environments without
+# Secret Service / D-Bus build without system deps. Production CLI
+# binary opts the feature on; library tests opt it off.
+keyring = { version = "3", default-features = false }
+# MIT — verified per `cargo info tracing-subscriber 0.3.23` license
+# field 2026-05-24. Direct dep for W24-OPS-α tracing init in
+# `arcgraph-cli::ops::tracing`. The `env-filter` feature parses
+# `RUST_LOG` for per-target verbosity; the `fmt` feature emits
+# structured stderr lines (default subscriber for v1.0-GA operator
+# tooling); the `registry` feature is the composable `Layer` stack
+# the OTLP-gRPC exporter chains onto. Already vendored transitively
+# via `tracing-test` + `criterion` (both pull `tracing-subscriber` at
+# the same pinned version per Cargo.lock 2026-05-24); promoting to a
+# direct workspace dep adds ZERO net new transitive surface.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "registry", "std", "ansi", "smallvec", "tracing-log"] }
+# Apache-2.0 OR MIT — verified per `cargo info axum 0.8` license field
+# 2026-05-24. Direct dep for W24-OPS-α admin HTTP server
+# (`arcgraph-cli::ops::admin_http`). Distinct from the W14α MCP HTTP
+# transport (`crates/arcgraph-mcp/src/transport/http.rs`) which uses
+# hyper-direct per its own design notes — the admin server's surface
+# is small but extension-friendly (livez/readyz today, future
+# operator-facing endpoints over the same router), so axum's typed
+# router + tower middleware are the right fit. `default-features =
+# false` strips the optional `multipart`/`ws`/`tower-log` features
+# the admin server doesn't need; explicit features select the
+# `http1` + `tokio` (async-runtime) + `json` (axum::Json extractor /
+# response) leg only.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "matched-path"] }
+# MIT — verified per `cargo info tower 0.5` license field 2026-05-24.
+# Direct dep for the W24-OPS-α admin HTTP server timeout layer;
+# already transitive via axum + tonic-via-opentelemetry-otlp so
+# promoting adds ZERO net new transitive surface.
+tower = { version = "0.5", default-features = false, features = ["timeout", "util"] }
+# MIT — verified per `cargo info tower-http 0.6` license field
+# 2026-05-24. Direct dep for the W24-OPS-α admin HTTP server's
+# request-tracing middleware (per-request structured span on
+# /livez + /readyz). `trace` feature only — the other tower-http
+# features (compression, cors, fs, auth) are not needed for the
+# admin surface.
+tower-http = { version = "0.6", default-features = false, features = ["trace"] }
+# Apache-2.0 — verified per `cargo info opentelemetry 0.27` license
+# field 2026-05-24. W24-OPS-α OTLP-gRPC tracing exporter root crate.
+# `default-features = false` strips the optional `metrics` + `logs`
+# features; the v1.0-GA exporter ships traces only (metrics are
+# already served via the Prometheus path landed in W15γ M6-06).
+opentelemetry = { version = "0.27", default-features = false, features = ["trace"] }
+# Apache-2.0 — verified per `cargo info opentelemetry_sdk 0.27`
+# license field 2026-05-24. The OpenTelemetry SDK that holds the
+# trace provider + batch-exporter pipeline the OTLP-gRPC exporter
+# attaches to. `rt-tokio` feature wires the batch processor onto
+# the existing tokio multi-thread runtime; `trace` enables the
+# tracing-pipeline API the CLI binary composes.
+opentelemetry_sdk = { version = "0.27", default-features = false, features = ["trace", "rt-tokio"] }
+# Apache-2.0 — verified per `cargo info opentelemetry-otlp 0.27`
+# license field 2026-05-24. The OTLP wire-format exporter; selected
+# features: `trace` (we ship traces, not metrics — Prometheus serves
+# metrics), `grpc-tonic` (per spawn prompt: OTLP-gRPC transport,
+# tonic-backed). The `http-proto` alternative would be lighter but
+# the spawn prompt explicitly says gRPC. Transitive surface adds:
+# tonic, prost, h2, axum (tonic pulls axum 0.7 as its own router) —
+# axum 0.7 vs 0.8 coexist as semver-distinct major versions per
+# Cargo's resolution rules.
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["trace", "grpc-tonic"] }
+# MIT — verified per `cargo info tracing-opentelemetry 0.28` license
+# field 2026-05-24. Bridge layer that converts `tracing` spans into
+# OpenTelemetry spans; chained into the `tracing-subscriber::registry`
+# stack so the OTLP exporter sees everything `tracing::info_span!`
+# produces. `default-features = false` strips the optional
+# `metrics` feature (we're trace-only); the `tracing-log` feature
+# is supplied at the tracing-subscriber level instead.
+tracing-opentelemetry = { version = "0.28", default-features = false }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

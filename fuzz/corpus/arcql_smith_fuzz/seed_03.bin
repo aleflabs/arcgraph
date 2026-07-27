@@ -1,0 +1,1 @@
+A long seed bytes that should hash to a stable u64 via FNV-1a across libfuzzer runs and exercise the larger-query path.

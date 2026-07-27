@@ -1,0 +1,1 @@
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:WORKS_AT]->(c:Company)-[:LOCATED_IN]->(d:City)-[:LOCATED_IN]->(e:Country) WHERE c.employees > 100 RETURN a, e

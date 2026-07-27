@@ -1,0 +1,1 @@
+MERGE (a:User {id: 1})-[r:FOLLOWS]->(b:User {id: 2})

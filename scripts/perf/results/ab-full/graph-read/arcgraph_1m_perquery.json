@@ -1,0 +1,1 @@
+{"tier":"1M","engine":"arcgraph","count_user_O1_ms":0.87,"point_lookup_name_ms":5183.58,"point_lookup_id_ms":4873.97,"compute_ms":0.86,"note":"O(1) count scales perfectly; UNINDEXED point-lookup = 5s full-scan at 1M (property-index #1398 Phase-0 NOT query-enabled)"}

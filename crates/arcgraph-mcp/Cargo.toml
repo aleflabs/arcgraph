@@ -1,0 +1,195 @@
+[package]
+name = "arcgraph-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Agent-facing MCP server, Bolt, and serialization (TOON/YAML/JSON) for ArcGraph."
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+arcgraph-core.workspace = true
+# ADR-202: direct dep so `MetricsRegistry` can implement the
+# community-resident `RefreshObserver` observability seam. Already a
+# transitive dep via arcgraph-storage -> arcgraph-community, so zero
+# net-new third-party surface; the edge is cycle-free (community sits
+# beneath storage; mcp sits above both).
+arcgraph-community.workspace = true
+arcgraph-query.workspace = true
+arcgraph-storage.workspace = true
+arcgraph-index.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+# W14γ M5-12 — `parking_lot::Mutex` guards the per-(tenant, op_class)
+# token-bucket map + per-tenant overrides + query-timeout map. Already
+# vendored transitively across the workspace; promoted to a direct dep
+# so call-sites are non-fragile against indirect-dep churn. License:
+# MIT OR Apache-2.0 (Prime Directive #1). The `arc_lock` feature is
+# inherited from the workspace.dependencies entry and consumed by NN-4
+# (#1384): the MERGE get-or-create serialization table hands an OWNING
+# `ArcMutexGuard` (via `Mutex::lock_arc`) to the executor's `MergeOp`.
+parking_lot.workspace = true
+# W13δ M5-01: UUIDv7 for per-request `request_id` in the per-request
+# tracing span (per ADR-038 amendment-03 §TIER-2-c observability). Same
+# crate already used by `arcgraph-query` for `QueryId`; uses the v7
+# feature for time-ordered IDs (diagnostic-friendly).
+uuid.workspace = true
+# Used by W11ε M5-09 TOON serializer + M5-10 YAML serializer as the
+# canonical intermediate representation: `to_toon` / `to_yaml` accept
+# any `T: Serialize`, route through `serde_json::Value`, and emit the
+# format-specific text. `serde_json::Value` was chosen over a hand-rolled
+# IR because (a) it preserves JSON's primitive lattice (string/number/
+# bool/null/array/object) which is exactly the lattice TOON's spec
+# normalizes onto, and (b) downstream MCP tools already speak JSON over
+# the wire — re-using `Value` removes a translation layer.
+serde_json.workspace = true
+bytes.workspace = true
+# v2 M2 (ADR-230) — `ResolvedProjection` carries the plan-time
+# name→key_id set as a `SmallVec<[(String, u32); 8]>` (design §M2.3:
+# "operators carry a small SmallVec<u32>"). Existing workspace dep
+# (MIT OR Apache-2.0), already used by arcgraph-storage.
+smallvec.workspace = true
+# v2 M2 (ADR-230 / design §M2.4) — Arrow RecordBatch batch
+# materialization straight from the typed property views (the mcp
+# layer is where storage views + the Value bridge meet, PD#7). SAME
+# Apache Arrow 58 crates are license-verified Apache-2.0 dependencies.
+arrow-array = "58"
+arrow-schema = "58"
+# Wraps `serde_yaml` for the W11ε M5-10 YAML serializer. The wrapper is
+# intentionally thin (M5-10 is "wrap serde_yaml" per the spawn prompt);
+# only the public-API translation is owned here, preserving the option
+# to swap to a maintained fork later without touching call-sites.
+serde_yaml.workspace = true
+# TLS hot-reload resolver. Default features include `aws_lc_rs`
+# (cryptographic provider used by `validation::build_certified_key`
+# for `aws_lc_rs::sign::any_supported_type`) + `std` + `tls12` +
+# `prefer-post-quantum` + `logging`. The `ring` feature is NOT
+# enabled (license incompatibility per Prime Directive #1).
+rustls.workspace = true
+# W13ε M5-02 — DER newtypes (`CertificateDer`, `PrivateKeyDer`) shared
+# with rustls + webpki. Since 1.9.0 this crate also exposes the
+# `pem::PemObject` trait, which we use directly for PEM parsing of cert
+# chains + private keys (replaces the now-unmaintained `rustls-pemfile`
+# per RUSTSEC-2025-0134 — the archived crate is itself a thin wrapper
+# over this same code path).
+rustls-pki-types.workspace = true
+# W13ε M5-02 — lock-free `Arc<CertifiedKey>` swap on reload.
+arc-swap.workspace = true
+# W13ε M5-02 — X.509 parsing for cert expiry + SAN/CN validation.
+x509-parser.workspace = true
+# Tokio async runtime — feature union for both W13δ M5-01 (stdio MCP
+# transport) + W13ε M5-02 (TLS hot-reload). Per design-v2 §4.1 the MCP
+# / agent surface is NOT a hot path — Tokio is the right runtime here
+# (Monoio is reserved for the executor + storage hot path). License:
+# MIT OR Apache-2.0 (Prime Directive #1). `default-features = false`
+# is inherited from the workspace entry — only the listed features
+# are enabled.
+#
+# Feature attribution:
+# - W13δ M5-01 stdio: `io-std` (`tokio::io::stdin`/`stdout`), `io-util`
+#   (`AsyncRead`/`AsyncWrite` extension methods used by the
+#   Content-Length JSON-RPC framer), `macros` (`#[tokio::test]`),
+#   `rt` + `rt-multi-thread` (runtime), `signal` (SIGTERM graceful
+#   shutdown), `sync` (oneshot/mpsc), `time` (test timeouts).
+# - W13ε M5-02 TLS: `signal` (`tokio::signal::unix::signal` for the
+#   SIGHUP reload loop), `sync` (watch-channel shutdown), `rt` +
+#   `macros` for `tokio::select!` + #[tokio::test], `time` +
+#   `rt-multi-thread` + `io-util` + `fs` for integration tests. The
+#   reload loop is `cfg(unix)`-gated; on non-unix targets these
+#   features compile but the loop function is absent.
+tokio = { workspace = true, features = [
+    "fs",
+    "io-std",
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+# W14α M5-03 — HTTP/TLS transport. Each crate's purpose is documented
+# in the workspace `[workspace.dependencies]` block.
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+tokio-rustls.workspace = true
+# W15γ M6-06 — Prometheus `/metrics` exporter implementing design-v2
+# §10.2 (Observability). License + feature selection rationale lives
+# in the workspace `[workspace.dependencies]` block; consumed here by
+# `transport::metrics`.
+prometheus.workspace = true
+# W16β M5-03 — OAuth 2.1 + PKCE Bearer-token verification (design-v2
+# §9.4 line 665). The dep set lands together because the
+# `auth::oauth_pkce` module consumes all four in one piece:
+# - `jsonwebtoken`: RS256/ES256/PS256 JWT signature verification +
+#   claims extraction.
+# - `base64`: BASE64URL-NO-PAD encoding for PKCE `code_challenge`
+#   per RFC 7636 §4.2.
+# - `rand`: cryptographic random for PKCE `code_verifier` per RFC
+#   7636 §4.1 (high-entropy random STRING).
+# - `sha2`: SHA-256 hash for PKCE `code_challenge` per RFC 7636 §4.2.
+# License + feature selection rationale lives in the workspace
+# `[workspace.dependencies]` block.
+jsonwebtoken.workspace = true
+base64.workspace = true
+rand.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+# W13ε M5-02 dev-only — `rcgen` synthesizes self-signed end-entity
+# certs + matching private keys for the validation + reload tests
+# without committing PEM blobs to the repo. Apache-2.0 OR MIT —
+# verified per `cargo info rcgen 0.14.7` license field 2026-05-10.
+rcgen = "0.14"
+# W13ε M5-02 dev-only — `time` for the test fixtures' validity-window
+# arithmetic (rcgen re-exports `OffsetDateTime` from this crate but
+# the type lives at `time::OffsetDateTime`). Apache-2.0 OR MIT.
+# Already present transitively via rcgen + x509-parser.
+time = "0.3"
+# W13ε M5-02 dev-only — `libc::kill(SIGHUP)` in the
+# `integ_sighup_loop_triggers_reload_end_to_end` integration test.
+# Apache-2.0 OR MIT — verified per `cargo info libc 0.2.185` license
+# field 2026-05-10. Already vendored transitively.
+libc = "0.2"
+# W13ε M5-02 dev-only — staged cert/key files during integration tests.
+# Same workspace dep, MIT OR Apache-2.0 per Prime Directive #1.
+tempfile.workspace = true
+
+# Criterion bench for W11ε M5-09 TOON encoder token-savings vs JSON.
+# Per spawn prompt §GAUNTLET step 5 ("`cargo bench -p arcgraph-mcp
+# --bench serializers_toon -- --quick` — assert ≥30% token reduction")
+# and testing strategy ("Every public performance-sensitive API has a
+# benchmark"). Asserts via panic-on-fail so a regression below 30%
+# blocks merges per design-v2 §9.3 ("40-60% fewer tokens than JSON on
+# uniform arrays"). Dataset: 100 LDBC SNB Person rows.
+[[bench]]
+name = "serializers_toon"
+harness = false
+
+# W17α M4-08+ R1 fix-up — bench for `CrudExecutorSubstrate::scan_nodes`
+# perf budget per R1 review MED-3 (PR #349). Pins the v1.0-α
+# O(node_high_water) cost at 10K nodes so a regression below the
+# current latency is visible AND the v1.1 label-index swap (issue
+# #351) has an objective acceptance bar.
+[[bench]]
+name = "scan_nodes_perf_budget"
+harness = false
+
+# v2 M2 (ADR-230 / design §M2.4) — column-wise Arrow RecordBatch
+# materialization vs the row-major executor IR, at the BATCH_ROWS
+# grain. Establishes the baseline the M4-64b vectorized-executor swap
+# is measured against; under the testing strategy every public perf-sensitive
+# API carries a bench.
+[[bench]]
+name = "m2_arrow_batch_materialization"
+harness = false

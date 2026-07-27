@@ -1,0 +1,30 @@
+# #1404 root-cause: /proc/PID/smaps_rollup at an RSS peak (~19GB @ ~1M nodes) — SANITIZED
+# Host: OCI VM. ArcGraph @ecc7c235. queue_len=0 at this exact peak (see probe_1404_channel_depth.log).
+#
+# DECISIVE: RSS ~19.98 GB is ~100% Anonymous heap (Pss_File only 6.5 MB = binary/libs).
+# => the entire OOM term is heap-allocated RESIDENT data structures (~20 KB/node), NOT the
+#    WAL command channel (which held 0 bytes). Confirms (ii) resident-stores, refutes (i) channel.
+#
+5bc996d6e000-7fff68bd7000 ---p 00000000 00:00 0                          [rollup]
+Rss:            19984644 kB
+Pss:            19982454 kB
+Pss_Dirty:      19975968 kB
+Pss_Anon:       19975968 kB
+Pss_File:           6486 kB
+Pss_Shmem:             0 kB
+Shared_Clean:       2292 kB
+Shared_Dirty:          0 kB
+Private_Clean:      6384 kB
+Private_Dirty:  19975968 kB
+Referenced:     19984644 kB
+Anonymous:      19975968 kB
+KSM:                   0 kB
+LazyFree:              0 kB
+AnonHugePages:         0 kB
+ShmemPmdMapped:        0 kB
+FilePmdMapped:         0 kB
+Shared_Hugetlb:        0 kB
+Private_Hugetlb:       0 kB
+Swap:                  0 kB
+SwapPss:               0 kB
+Locked:                0 kB

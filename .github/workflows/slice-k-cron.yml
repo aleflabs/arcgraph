@@ -1,0 +1,279 @@
+# Slice K — Pre-v1.0-alpha hardening cron
+#
+# Per ADR-038 amendment-03 §"Slice K" + §Structural-4 (Slice K is the
+# pre-v1.0-alpha hardening harness, not a Jepsen-class certification).
+# This workflow runs the K-1 + K-1c+d + K-2 smokes on a recurring
+# schedule + on-demand, capturing failure artifacts (logs + oracle
+# reports) for post-mortem.
+#
+# ## EBS opt-in path (per K-2 multi_fs.rs::EbsAdapter::ebs_env_set)
+#
+# K-2's EBS adapter is gated by the `K_2_EBS=1` env var. The cron
+# path leaves EBS DISABLED by default to keep cost low (running EBS
+# exercises an AWS volume + costs $$/GB-h); the
+# `workflow_dispatch.inputs.enable_ebs` toggle activates EBS for
+# manual on-demand runs only. This is option (b) in the K-1c spawn
+# prompt's EBS-opt-in matrix.
+#
+# ## Artifact retention
+#
+# 7 days — matches GitHub Actions' default. Per the K-1c spawn
+# prompt: "don't set higher without quantifying storage cost."
+#
+# ## Schedule cadence (daily; was hourly — CI-cost rescope)
+#
+# The K-1c roadmap row originally specified a "1-hour CI cron"; the
+# stated goal was to catch a mid-day regression "within the hour."
+# Two findings retired the hourly cadence (CI-cost optimization,
+# 2026-06-02):
+#
+#   1. **GitHub already throttles it.** Measured actual fire rate over
+#      a 12-day window was ~7-12 runs/day, NOT ~24 — GitHub Actions
+#      delays / drops high-frequency `schedule` events under runner-
+#      pool load (documented behavior), so the "within the hour"
+#      promise was already not being met in practice.
+#   2. **Cost.** At ~23 billable runner-minutes per fire (10 jobs;
+#      see the matrix below) hourly cost ~6,200 min/mo — the single
+#      largest steady-state line item in the org's GitHub Actions
+#      bill. Slice K is a pre-v1.0-alpha hardening MONITOR; it is NOT
+#      a required / branch-protection status check (only the `CI`
+#      workflow gates merges), so a regression it catches blocks
+#      nothing at merge-time — a 24-hour detection latency is
+#      acceptable for a monitor.
+#
+# We therefore run **daily at 04:07 UTC**, aligning with the other
+# nightly hardening crons (v1-alpha-chaos-gate 04:00, soak 02:00) so
+# the overnight hardening story is coherent and runner-pool
+# contention stays bounded. On-demand `workflow_dispatch` remains for
+# immediate post-change verification when a regression is suspected.
+#
+# The matrix runs are sized to fit well inside a single daily window
+# even on the slowest GitHub-hosted runner — k1-30s-smoke (5 min
+# budget), k1-extended-smoke (10 min), k1-subprocess-smoke (10 min),
+# k1-cross-tenant-fault-isolation (5 min), k1c-encoding-mismatch
+# matrix × 5 (15 min), k2-multi-fs (5 min) → ~23 billable min summed
+# across jobs, ~50 min wall clock under matrix parallelism.
+#
+# ## Permission scope
+#
+# read-only (`contents: read`); the cron does not push, comment, or
+# release. Artifact upload uses the workflow-token's default scope.
+
+name: Slice K — pre-v1.0-alpha hardening cron
+
+on:
+  schedule:
+    # Daily at 04:07 UTC (was hourly '7 * * * *' — see the "Schedule
+    # cadence" header block above for the CI-cost rationale). :07
+    # offset dodges :00 contention; 04:xx slots alongside the other
+    # overnight hardening crons (chaos-gate 04:00, soak 02:00).
+    - cron: '7 4 * * *'
+  workflow_dispatch:
+    inputs:
+      enable_ebs:
+        description: 'Set K_2_EBS=1 for EBS adapter (manual EBS runs only; default off to control AWS cost)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+concurrency:
+  # One run at a time per workflow+ref; if a new tick fires while the
+  # prior one is still running, cancel the prior. Keeps runner-cost
+  # bounded even if a single iteration overruns.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # K-1a — 30 s smoke (CI-gating short campaign)
+  # ────────────────────────────────────────────────────────────────
+  k1-30s-smoke:
+    name: K-1a 30s smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run k1_smoke_30s
+        run: |
+          mkdir -p target/k1c-cron-logs
+          cargo test -p arcgraph-storage --release \
+            --test k1_smoke_30s -- --nocapture \
+            2>&1 | tee target/k1c-cron-logs/k1_smoke_30s.log
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k1-30s-smoke-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/k1c-cron-logs/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────
+  # K-1a — 5 min extended smoke (gated by K1_EXTENDED_SMOKE=1)
+  # ────────────────────────────────────────────────────────────────
+  k1-extended-smoke:
+    name: K-1a extended smoke (5min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run k1_extended_smoke_5min
+        env:
+          K1_EXTENDED_SMOKE: '1'
+        run: |
+          mkdir -p target/k1c-cron-logs
+          cargo test -p arcgraph-storage --release \
+            --test k1_extended_smoke_5min -- --ignored --nocapture \
+            2>&1 | tee target/k1c-cron-logs/k1_extended_smoke_5min.log
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k1-extended-smoke-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/k1c-cron-logs/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────
+  # K-1a — Subprocess SIGKILL smoke (gated by K1_SUBPROCESS_SMOKE=1)
+  # ────────────────────────────────────────────────────────────────
+  k1-subprocess-smoke:
+    name: K-1a subprocess smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run k1_subprocess_smoke
+        env:
+          K1_SUBPROCESS_SMOKE: '1'
+        run: |
+          mkdir -p target/k1c-cron-logs
+          # `--ignored` is load-bearing here: the SIGKILL workload test
+          # `k1_subprocess_smoke_wal_workload` is `#[ignore]`'d (per K-1
+          # convention — the ignored test IS the workload). Without the
+          # flag, cargo silently filters the workload and only the
+          # `aaaa_subprocess_dispatcher_router` no-op router stub runs,
+          # so the SIGKILL regression detector never fires. Mirrors the
+          # `k1-extended-smoke` job's pattern above.
+          cargo test -p arcgraph-storage --release \
+            --test k1_subprocess_smoke -- --ignored --nocapture \
+            2>&1 | tee target/k1c-cron-logs/k1_subprocess_smoke.log
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k1-subprocess-smoke-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/k1c-cron-logs/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────
+  # K-1b — Cross-tenant fault isolation pin (issue #214)
+  # ────────────────────────────────────────────────────────────────
+  k1-cross-tenant-fault-isolation:
+    name: K-1b cross-tenant isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run k1_cross_tenant_fault_isolation
+        run: |
+          mkdir -p target/k1c-cron-logs
+          cargo test -p arcgraph-storage --release \
+            --test k1_cross_tenant_fault_isolation -- --nocapture \
+            2>&1 | tee target/k1c-cron-logs/k1_cross_tenant_fault_isolation.log
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k1-cross-tenant-fault-isolation-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/k1c-cron-logs/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────
+  # K-1c+d — Encoding-mismatch I-V coverage (matrix over 5 invariants)
+  # ────────────────────────────────────────────────────────────────
+  k1c-encoding-mismatch:
+    name: "K-1c+d encoding-mismatch (${{ matrix.invariant.name }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        invariant:
+          - { name: 'I-1 record-format', test: 'k1c_encoding_mismatch_record_format_replay' }
+          - { name: 'I-2 key-format', test: 'k1c_encoding_mismatch_key_format_replay' }
+          - { name: 'I-3 mvcc-chain-layout', test: 'k1c_encoding_mismatch_mvcc_chain_layout_replay' }
+          - { name: 'I-4 wal-commit-bundle-atomicity', test: 'k1c_encoding_mismatch_wal_commit_bundle_atomicity_replay' }
+          - { name: 'I-5 cross-tenant-serialization', test: 'k1c_encoding_mismatch_cross_tenant_serialization_replay' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: "Run ${{ matrix.invariant.test }}"
+        run: |
+          mkdir -p target/k1c-cron-logs
+          cargo test -p arcgraph-storage --release \
+            --test ${{ matrix.invariant.test }} -- --nocapture \
+            2>&1 | tee target/k1c-cron-logs/${{ matrix.invariant.test }}.log
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "k1c-${{ matrix.invariant.test }}-failure-${{ github.run_id }}-${{ github.run_attempt }}"
+          path: target/k1c-cron-logs/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────
+  # K-2 — Multi-FS adapter scaffolding (issue #223)
+  #
+  # EBS opt-in: only K_2_EBS=1 if the dispatcher input is set true.
+  # Cron path leaves it off (cost control); manual workflow_dispatch
+  # can flip it on.
+  # ────────────────────────────────────────────────────────────────
+  k2-multi-fs:
+    name: K-2 multi-FS smokes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run k2_concurrent_snapshot_recovery
+        env:
+          K_2_EBS: ${{ github.event.inputs.enable_ebs == 'true' && '1' || '0' }}
+        run: |
+          mkdir -p target/k1c-cron-logs
+          cargo test -p arcgraph-storage --release \
+            --test k2_concurrent_snapshot_recovery -- --nocapture \
+            2>&1 | tee target/k1c-cron-logs/k2_concurrent_snapshot_recovery.log
+      - name: Run k2_fault_during_recovery
+        env:
+          K_2_EBS: ${{ github.event.inputs.enable_ebs == 'true' && '1' || '0' }}
+        run: |
+          cargo test -p arcgraph-storage --release \
+            --test k2_fault_during_recovery -- --nocapture \
+            2>&1 | tee target/k1c-cron-logs/k2_fault_during_recovery.log
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k2-multi-fs-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/k1c-cron-logs/
+          retention-days: 7

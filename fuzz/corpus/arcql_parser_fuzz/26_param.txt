@@ -1,0 +1,1 @@
+MATCH (n:Person) WHERE n.age > $minAge AND n.city = $city RETURN n LIMIT $k

@@ -1,0 +1,5 @@
+schema:
+  labels: [Person, Comment]
+  props:
+    Person: [id, name]
+version: 1

@@ -1,0 +1,99 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ArcGraph single-node smoke (W24-OPS-α / ADR-093 §D-5).
+#
+# Distinct from the repo-root `docker-compose.yml` (which is the Prometheus
+# + Grafana dev-tooling stack from W15β M6-03). This compose ships the
+# minimal v1.0-GA shape — one `arcgraph` container with the admin HTTP
+# port and the MCP HTTP port exposed.
+#
+# Usage:
+#   $ cd deploy
+#   $ docker compose up --build
+#   $ curl http://localhost:8090/livez
+#   $ curl http://localhost:8090/readyz
+#
+# License gate (PD-1): the `arcgraph:dev` image inherits the repo's
+# Apache-2.0 LICENSE; no third-party image is pulled in this compose
+# (the prom + grafana stack lives at the repo-root compose).
+#
+# Per ADR-093 §D-5 the docker-compose smoke target ships in `deploy/`
+# (this file) alongside the Kubernetes manifests in `deploy/k8s/`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  arcgraph:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: arcgraph:dev
+    container_name: arcgraph-v1ga-smoke
+    # MCP HTTP transport port (forward-bound to M6-08+ TLS wiring) +
+    # admin HTTP port (W24-OPS-α / ADR-093 §D-1).
+    #
+    # W24-OPS-α R1 fix-up (MED M3): Prometheus scrape port 9090 is
+    # removed because `--stdio-mcp` does NOT bind a `/metrics`
+    # listener. The port re-appears at M6-08+ when the
+    # `--metrics-http` CLI flag + listener ship.
+    ports:
+      - "8080:8080"  # HTTP MCP (W14α M5-02b; cert/key wiring at M6-08+)
+      - "8090:8090"  # Admin HTTP (livez / readyz per ADR-093 §D-1)
+      - "7687:7687"  # Bolt (W14δ M5-13)
+    environment:
+      # W24-OPS-α — tracing init env vars per ADR-093 §D-2.
+      RUST_LOG: "warn,arcgraph=info,arcgraph_cli=info,arcgraph_mcp=info,arcgraph_storage=info,arcgraph_query=info"
+      # Set the OTLP endpoint to enable trace export. Leave unset to
+      # default to stderr-only.
+      # ARCGRAPH_OTLP_ENDPOINT: "http://otel-collector:4317"
+      # ARCGRAPH_OTLP_SERVICE_NAME: "arcgraph-v1ga-smoke"
+    # Persist the durable page store and WAL under `/var/lib/arcgraph`.
+    volumes:
+      - arcgraph-data:/var/lib/arcgraph
+    # W24-OPS-α — the container's command MUST exercise the admin HTTP
+    # bind (`--admin-http`).
+    # The stdio MCP transport reads from container stdin which is
+    # awkward in detached mode; once the M6-08+ HTTP transport TLS
+    # wiring lands, swap `--stdio-mcp` for `--http 0.0.0.0:8080`
+    # + cert/key flags.
+    #
+    # W24-OPS-α R1 fix-up (BLOCKER H1): docker-compose port-mapping
+    # publishes the admin port to the host, which requires binding
+    # 0.0.0.0:8090 inside the container. Non-loopback admin bind is
+    # gated behind `--allow-remote-admin-bind` (W14 retro IR
+    # L1-HIGH-4 loopback-default discipline).
+    #
+    # W28 / ADR-183 (durable-by-default): `serve` refuses to start
+    # without an explicit storage mode, so the command passes
+    # `--data /var/lib/arcgraph/data` — a durable file-backed page
+    # store (`pages.db`) + WAL (`wal/`) under the persistent
+    # `arcgraph-data` named volume (mounted at `/var/lib/arcgraph`).
+    # `DEFAULT` runs at
+    # `DurabilityTier::Strict` → committed records survive container
+    # restart (the GA durability guarantee).
+    command:
+      - "serve"
+      - "--stdio-mcp"
+      - "--data"
+      - "/var/lib/arcgraph/data"
+      - "--admin-http"
+      - "0.0.0.0:8090"
+      - "--allow-remote-admin-bind"
+    stdin_open: true
+    tty: false
+    restart: unless-stopped
+    healthcheck:
+      # W24-OPS-α — use the new admin HTTP /livez endpoint instead of
+      # the MCP transport's /healthz. The distroless `cc-debian12:nonroot`
+      # base image has no curl/wget; we use the in-binary `arcgraph
+      # health` subcommand pointed at /livez.
+      test: ["CMD", "/usr/local/bin/arcgraph", "health", "--addr", "http://127.0.0.1:8090/livez"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  arcgraph-data:
+    driver: local
+
+# v1.1 — Helm chart deferred; v1.0-GA ships the StatefulSet + Service +
+# ConfigMap manifests in `deploy/k8s/` as the canonical reference.

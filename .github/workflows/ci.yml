@@ -1,0 +1,333 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!**/*.md'
+      # The agent-usability gate treats README commands and expected output
+      # as executable contracts, so README-only pull requests must run CI.
+      - 'README.md'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # CI fix: linking the `--all-features` debug test binaries (one per test
+  # target across the whole workspace) exhausts the ~7GB GitHub-hosted runner
+  # and crashes the linker with `collect2: ld terminated with signal 7 [Bus
+  # error]`. Dropping test-binary debuginfo shrinks each link dramatically and
+  # removes the OOM; pass/fail semantics are unaffected (RUST_BACKTRACE still
+  # yields frames, just without line tables).
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  # CI fix: env-gated tests PANIC by default (per
+  # feedback_test_env_gate_panic_by_default.md — soft-skip is the worst bug
+  # class, so suites needing chaos/soak/external infra panic unless explicitly
+  # opted out). The local gauntlet sets these SKIP_OK flags; CI's bare
+  # `cargo test --all-features` set none, so every gated suite panicked
+  # (w25_chaos_admin_http.rs:60 etc.). This block is the canonical skip-set —
+  # it must stay in sync with the SPAWN_PROMPT_PREAMBLE addendum-19 gauntlet
+  # template per feedback_panic_by_default_gates_require_template_sync.md.
+  # These suites run in their dedicated harnesses, not the standard CI runner.
+  ARCGRAPH_PROMTOOL_SKIP_OK: "1"
+  ARCGRAPH_HADOLINT_SKIP_OK: "1"
+  ARCGRAPH_ACTIONLINT_SKIP_OK: "1"
+  ARCGRAPH_DOCKER_SKIP_OK: "1"
+  ARCGRAPH_TCK_SKIP_OK: "1"
+  ARCGRAPH_DRIVER_COMPAT_SKIP_OK: "1"
+  ARCGRAPH_W22DB_RETRIEVAL_SKIP_OK: "1"
+  ARCGRAPH_DST_SKIP_OK: "1"
+  ARCGRAPH_SUBPROCESS_SMOKE_SKIP_OK: "1"
+  ARCGRAPH_MVCC_BENCH_SKIP_OK: "1"
+  ARCGRAPH_W25_CHAOS_SKIP_OK: "1"
+  ARCGRAPH_W25_SOAK_SKIP_OK: "1"
+  ARCGRAPH_W25_SKIP_HELM_LINT: "1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt (nightly)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - run: cargo +nightly fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  agent-quickstart:
+    name: clean-clone agent quickstart
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and drive the public database from a clean tree
+        run: bash scripts/agent-quickstart-gate.sh
+
+  # ── Sharded test suite ──────────────────────────────────────────────
+  # The single-job `cargo test --workspace --all-features` run grew to the
+  # edge of its fail-fast guard: green main run 26903681299 (2026-06-03)
+  # spent 24m28s in the test step / 26m34s job wall — 88% of the old 30-min
+  # budget — and PRs #823/#840 were CANCELLED at 30m16s/30m19s.
+  #
+  # Diagnosis (per-binary `finished in`, that green run): this is NOT the
+  # #711-class hang the guard was added for. Every one of the 501 test
+  # binaries completes deterministically (job exited 0). The 1,050s run
+  # phase is (a) broad, legitimate growth — storage 96 / query 133 / mcp 71
+  # test binaries — plus a recent benchmark addition (#698 LDBC, 127s),
+  # layered on (b) an always-heavy tail: `arcgraph-vector` index builds
+  # (390s = 37% of the run) and two compile-subprocess example/doc guards
+  # in the umbrella crate (203s). The supernode tests (#826/#837) are fast
+  # (k4_supernode_hot_expand = 0.00s) — ruled out as a balloon. See #847
+  # for the heavy-tail optimisation follow-ups.
+  #
+  # Fix: shard by package group so the suite runs in parallel instead of
+  # serially. On 2026-07-10 the `timeout-minutes` guard was widened 30->45
+  # with data: the core-shard warm baseline was 26m27s on green main at that
+  # time. That baseline is now STALE: green-main `test (core)` measured
+  # 43m05s (run 29388730992) and 44m36s (run 29449295762) on 2026-07-16 —
+  # 8 seconds under the 45m cap — and cold-cache/subprocess jitter tipped
+  # PR #1506 over the edge twice (45m23s / 45m16s cancelled entering
+  # tests/tck.rs, zero test failures). A shard riding its own timeout
+  # destroys the gate signal for every PR, so on 2026-07-16 the guard was
+  # widened 45->75 for immediate headroom AND `core` was split, pulling the
+  # heaviest remaining crate (`arcgraph-storage` — the largest test suite in
+  # the workspace, including the K1 subprocess dispatchers, loom models, and
+  # wal_replay families) into its own `storage` shard so `core` is no longer
+  # the long pole. Tighten both the timeout and the partition with data once
+  # warm baselines exist for the 4-shard split (tracked in #847 and #1438).
+  # The four shards partition the workspace exactly once (vector |
+  # umbrella | storage | everything-else via --exclude), so coverage
+  # is identical to the old `--workspace` run.
+  test-shard:
+    name: test (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false # one shard failing must not cancel its siblings
+      matrix:
+        include:
+          # Heaviest single crate (HNSW / DiskANN / SSD index builds), isolated.
+          - shard: vector
+            scope: "-p arcgraph-vector"
+          # Umbrella compile-subprocess guards.
+          - shard: heavy
+            scope: "-p arcgraph"
+          # Largest test suite in the workspace (K1 subprocess dispatchers +
+          # concurrency models + wal_replay families) — was the bulk of
+          # the old `core` shard's 43-44.5m runtime. Isolated on 2026-07-16
+          # so `core` is no longer the long pole.
+          - shard: storage
+            scope: "-p arcgraph-storage"
+          # Everything else — the exact complement of the three shards
+          # above, so (vector) ∪ (heavy) ∪ (storage) ∪ (core) = the whole
+          # workspace, each member run exactly once. No package is silently
+          # dropped.
+          - shard: core
+            scope: "--workspace --exclude arcgraph-vector --exclude arcgraph --exclude arcgraph-storage"
+    steps:
+      - uses: actions/checkout@v4
+      # Free runner disk BEFORE the heavy compile/link — the `--all-features`
+      # debug test binaries (one per test target across the whole workspace)
+      # exhaust the default ~7 GB GitHub-hosted runner and crash the linker
+      # with "rustc-LLVM ERROR: IO failure on output stream: No space left on
+      # device" / "ld terminated with signal 7 [Bus error]" (#1389) — a disk
+      # exhaustion at link time, NOT a real test failure. CARGO_PROFILE_TEST_
+      # DEBUG=0 (env, above) is the biggest lever; this best-effort cleanup of
+      # unused preinstalled toolchains is the remaining one. Mirrors the proven
+      # step in coverage.yml (and security-audit-extended.yml).
+      - name: Free disk space (debug test-binary link is large — #1389)
+        continue-on-error: true
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h /
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Per-shard cache key: the shards build different subsets, so a
+          # shared key would thrash. Each shard keeps its own warm target.
+          key: ${{ matrix.shard }}
+      - run: cargo build ${{ matrix.scope }} --all-features
+      - run: cargo test ${{ matrix.scope }} --all-features
+
+  # Aggregator gate: preserves the single human-/branch-protection-visible
+  # `test` status check while the real work runs in the parallel shards
+  # above. Green IFF every shard succeeded; on draft PRs it skips in
+  # lockstep with the shards (the `if` matches the shards' draft guard).
+  test:
+    name: test
+    needs:
+      [
+        test-shard,
+        arcgraph-cli-release-fault-injection,
+        arcgraph-storage-release-fault-injection,
+      ]
+    runs-on: ubuntu-latest
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    steps:
+      - name: Require all test shards to pass
+        run: |
+          shard_result='${{ needs.test-shard.result }}'
+          release_fault_result='${{ needs.arcgraph-cli-release-fault-injection.result }}'
+          storage_release_result='${{ needs.arcgraph-storage-release-fault-injection.result }}'
+          if [ "$shard_result" != "success" ]; then
+            echo "::error::test shards did not all pass (aggregate result: $shard_result)"
+            exit 1
+          fi
+          if [ "$release_fault_result" != "success" ]; then
+            echo "::error::arcgraph-cli release fault-injection gate did not pass (result: $release_fault_result)"
+            exit 1
+          fi
+          if [ "$storage_release_result" != "success" ]; then
+            echo "::error::arcgraph-storage release M6.1/M6.2 gate did not pass (result: $storage_release_result)"
+            exit 1
+          fi
+          echo "all test shards and both release fault-injection gates passed"
+
+  # M6.1's decisive eviction race and pin-sweep gates and M6.2's scratch plus
+  # external-sort, Grace hash-join, and expand-frontier gates need optimized production types,
+  # while their
+  # deterministic test state must stay absent from an ordinary release binary.
+  # The off-by-default `fault-injection` feature exposes only those test seams
+  # in this lane.
+  arcgraph-storage-release-fault-injection:
+    name: arcgraph-storage release M6.1/M6.2 fault-injection
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space (release storage test link is large)
+        continue-on-error: true
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h /
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: arcgraph-storage-release-fault-injection
+      - name: Run release M6.1/M6.2 eviction, spill, sort, join, expand, and enforcement gates
+        run: |
+          cargo test -p arcgraph-storage --release --features fault-injection --test m6_evict_races_commit_deterministic --test m6_pin_sweep_install_create_and_fresh --test m6_spill_abort_restart_isolated --test m6_spill_scratch_encrypted --test m6_release_enforcement_is_not_debug_only
+          cargo test -p arcgraph-query --release --features fault-injection --test m6_extsort_gates --test m6_hashjoin_gates --test m6_expand_gates
+
+  # INV-M5.2/.4/.6/.7/.8/.9/.10/.11/.13/.14 are production-regime contracts.
+  # The durability faults retain `not(debug_assertions)`, and the continuity +
+  # concurrency gates must run on the same optimized types as the shipped
+  # binary, so the debug core shard is not sufficient for this suite.
+  arcgraph-cli-release-fault-injection:
+    name: arcgraph-cli release fault-injection
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space (release fault-gate link is large)
+        continue-on-error: true
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h /
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: arcgraph-cli-release-fault-injection
+      # All four `--test` targets in ONE invocation: the m4 leg-(b)
+      # migration gate, the m5 leg-(c) attach-spine gate, the M5-D2
+      # served-store-completeness gate, AND the M5-D1b #1513
+      # tenant-registration gate. The m5 attach gate's release-only
+      # controls (`load_ledger_proof_consumed_in_release` — INV-M5.1/.6
+      # fresh half) are `cfg(all(feature = "fault-injection",
+      # not(debug_assertions)))`, so this job is the ONLY CI lane that
+      # compiles and runs them; the concurrent-loader exactly-one-wins race
+      # gate also runs here on the shipped optimized types. The M5-D2 gates
+      # (INV-M5.20/.17/.12 + the INV-M5.8 props-drop control) prove their
+      # RED-on-revert by arming the cfg-gated seams
+      # (ARCGRAPH_M5_SHIP_EMPTY_PROPS / _SHIP_EMPTY_TEL / _LOSSY_FLOAT_BITS
+      # / _DROP_LOADER_PROPS) in child processes and asserting the armed
+      # runs FAIL — this lane is the CI-executed RED-on-revert evidence.
+      # The M5-D1b gates do the same with
+      # ARCGRAPH_M5_SKIP_CENSUS_REGISTRATION (register-nothing mutant →
+      # the exact #1513 `unknown tenant` repro at the production
+      # route(tenant, ZERO) dispatch), _CENSUS_REGISTRATION_SUBSET, and
+      # _CRASH_MID_CENSUS_REGISTRATION (abort-mid-sweep recovery).
+      # The M5-D3 parallel-decomposition gates (INV-M5.24 byte-identical
+      # determinism, INV-M5.19 cross-run dup re-proof, INV-M5.25 derived
+      # budgets, INV-M5.15 parallel-regime continuous RSS + the collect-all
+      # control) run here too: their RED-on-revert controls arm the
+      # cfg-gated seams (ARCGRAPH_M5_ARRIVAL_ORDER_IDS / _RANGE_BY_RUN /
+      # _FIXED_BULK_CAPS / _ZERO_BULK_BUDGET / _COLLECT_ALL / _ZERO_REL_PAYLOAD_BUDGET)
+      # in child processes and assert the armed runs FAIL — CI-executed
+      # RED-on-revert evidence on release types (amendment §M5-D3). The
+      # M5-D3 gate-fix (#1518) adds the full-input resume-identity gate
+      # (m5_input_identity_gate) and the adopted restart-hardening probes
+      # (m5_restart_hardening_gate).
+      - name: Run release M5 migration, concurrency, served-store, tenant-registration, and parallel-decomposition gates
+        run: cargo test -p arcgraph-cli --release --features fault-injection --test m4_data_dir_migration_gate --test m5_load_attach_gate --test m5_served_store_gate --test m5_tenant_registration_gate --test m5_parallel_decomp_gate --test m5_input_identity_gate --test m5_restart_hardening_gate
+
+  deny:
+    name: cargo-deny (license enforcement)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # W24-CYPHER-TCK smoke gate (per ADR-095 §5 "CI smoke gate").
+  #
+  # This job runs ONLY the static categorization unit tests in
+  # `arcgraph_tck::scorecard::tests` — the freshness check is the
+  # load-bearing tripwire that catches categorization drift BEFORE
+  # the (heavier) cucumber harness body even loads. Job is
+  # cheap (<2 minutes wall) and parallels the workspace `test`
+  # job above. The full cucumber harness still runs in `test` via
+  # `cargo test --workspace --all-features` (default-run per the
+  # spawn-prompt inversion: TCK tests SHOULD run; no skip-by-default
+  # env var introduced).
+  cypher-tck-smoke:
+    name: openCypher TCK smoke (scorecard categorization)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Scorecard categorization unit tests (drift gate)
+        run: cargo test -p arcgraph-tck --lib scorecard -- --nocapture
+      - name: Re-derive scorecard markdown + diff vs in-tree snapshot
+        run: |
+          cargo run --quiet -p arcgraph-tck --bin cypher-tck-scorecard \
+            > /tmp/cypher-tck-scorecard.regenerated.md
+          diff -u docs/conformance/cypher-tck-scorecard.md \
+                  /tmp/cypher-tck-scorecard.regenerated.md \
+            || { echo "::error::scorecard drift detected; regenerate via 'cargo run --quiet -p arcgraph-tck --bin cypher-tck-scorecard > docs/conformance/cypher-tck-scorecard.md' and commit the change"; exit 1; }

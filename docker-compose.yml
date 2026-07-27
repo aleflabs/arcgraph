@@ -1,0 +1,109 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Local-dev docker-compose for ArcGraph (W15β M6-03).
+#
+# Brings up:
+#   • arcgraph  — the database engine container (built from ./Dockerfile)
+#   • prometheus — scrapes the M6-06 Prometheus exporter on :9090
+#   • grafana   — visualizes Prometheus metrics on :3000
+#
+# Intended for local development + smoke testing; NOT a production
+# topology. Production deployments would bind via Kubernetes manifests
+# (M6-08+) with TLS via cert-manager and external scraping.
+#
+# Usage:
+#   $ docker compose up --build
+#   $ open http://localhost:3000  (grafana, admin/admin)
+#
+# Prometheus + Grafana entries are commented-out by default because the
+# M6-06 metrics exporter has not landed at HEAD `056805b` — uncomment
+# once M6-06 ships (sister PR #309) and the `arcgraph` container
+# actually exposes `/metrics` on :9090. The `./deploy/...` bind-mount
+# sources DO exist at HEAD (added in this slice as minimal stubs):
+#   • `./deploy/prometheus.yml` — scrapes `arcgraph:9090/metrics`.
+#   • `./deploy/grafana/provisioning/datasources/prometheus.yml` —
+#     auto-wires the Prometheus datasource into Grafana.
+# Dashboard JSON lands in W15δ M6-07 (sister PR #307).
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# License gate (PD-1):
+#   • prom/prometheus image  → Apache-2.0 (https://github.com/prometheus/prometheus/blob/main/LICENSE)
+#   • grafana/grafana image  → AGPL-3.0 since v8.0 — AGPL is NOT PD-1
+#     compatible for the engine binary, but compose is a DEV ergonomic
+#     and Grafana runs as a SEPARATE service over HTTP; the Apache-2.0
+#     ArcGraph binary does not link Grafana. This mirrors how upstream
+#     Apache projects (e.g. Apache Kafka) ship Grafana-based dashboards
+#     for development. Users who object can swap for VictoriaMetrics
+#     UI (Apache-2.0) by editing this file.
+
+services:
+  arcgraph:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: arcgraph:dev
+    container_name: arcgraph
+    # Expose stdio MCP on the host's STDIN/STDOUT is not meaningful for
+    # `docker compose up` (compose attaches stdin only with `tty: true`
+    # + `stdin_open: true` and an interactive client). For now the
+    # `arcgraph-mcp-stdio` binary exits on stdin EOF at container start
+    # in detached mode; once the M6-02 umbrella binary + HTTP serve
+    # subcommand lands, replace this stanza with the HTTP transport.
+    stdin_open: true
+    tty: false
+    # Forward-method ports (binds happen once M6-02 + M5-13 servers
+    # land); these are no-ops today since the stdio binary doesn't bind
+    # network sockets.
+    ports:
+      - "7687:7687"  # Bolt (W14δ M5-13)
+      - "8080:8080"  # HTTP MCP (W14α M5-02b)
+      - "9090:9090"  # Prometheus scrape (M6-06)
+    environment:
+      # Tracing verbosity; the W14δ `arcgraph-mcp-stdio` honors RUST_LOG
+      # via env-only tracing init (no tracing-subscriber dep at v1.0-α).
+      RUST_LOG: "info,arcgraph_mcp=debug"
+    # The container's only writable surface today is the WAL dir once
+    # storage lands; v1.0-α stub binary is stateless.
+    restart: unless-stopped
+    networks:
+      - arcgraph-net
+
+  # ── Prometheus + Grafana (commented; uncomment once M6-06 ships) ──
+  #
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: arcgraph-prometheus
+  #   ports:
+  #     - "9091:9090"  # Prometheus UI (avoid collision w/ arcgraph :9090)
+  #   volumes:
+  #     - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #   command:
+  #     - --config.file=/etc/prometheus/prometheus.yml
+  #     - --storage.tsdb.retention.time=7d
+  #   networks:
+  #     - arcgraph-net
+  #   depends_on:
+  #     - arcgraph
+  #
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   container_name: arcgraph-grafana
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     GF_SECURITY_ADMIN_USER: admin
+  #     GF_SECURITY_ADMIN_PASSWORD: admin
+  #     GF_USERS_ALLOW_SIGN_UP: "false"
+  #   volumes:
+  #     - grafana-data:/var/lib/grafana
+  #     - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+  #   networks:
+  #     - arcgraph-net
+  #   depends_on:
+  #     - prometheus
+
+networks:
+  arcgraph-net:
+    driver: bridge
+
+# volumes:
+#   grafana-data:

@@ -1,0 +1,313 @@
+{
+  "addr": "localhost:7687",
+  "workload": [
+    [
+      "count_user",
+      "MATCH (n:User) RETURN count(n)"
+    ],
+    [
+      "count_all",
+      "MATCH (n) RETURN count(n)"
+    ],
+    [
+      "expand_count",
+      "MATCH (a:User)-[:KNOWS]->(b:User) RETURN count(b)"
+    ],
+    [
+      "point_lookup",
+      "MATCH (n:User {name:'user_1000'}) RETURN n.age"
+    ],
+    [
+      "anchored_expand",
+      "MATCH (a:User {name:'user_100'})-[:KNOWS]->(b) RETURN b.name"
+    ],
+    [
+      "compute_floor",
+      "RETURN 1 IN [1,2,3]"
+    ]
+  ],
+  "duration_s": 15.0,
+  "warmup_s": 3.0,
+  "levels": [
+    {
+      "concurrency": 1,
+      "duration_s": 15.006,
+      "completed": 1662,
+      "errors": 0,
+      "rps": 110.8,
+      "lat_ms": {
+        "p50": 11.917,
+        "p95": 20.082,
+        "p99": 20.425,
+        "max": 21.241,
+        "mean": 9.026
+      },
+      "by_type": {
+        "anchored_expand": {
+          "n": 276,
+          "p50": 12.042,
+          "p99": 12.48
+        },
+        "compute_floor": {
+          "n": 138,
+          "p50": 1.101,
+          "p99": 1.439
+        },
+        "count_all": {
+          "n": 139,
+          "p50": 1.135,
+          "p99": 2.658
+        },
+        "count_user": {
+          "n": 417,
+          "p50": 1.148,
+          "p99": 1.556
+        },
+        "expand_count": {
+          "n": 278,
+          "p50": 19.92,
+          "p99": 20.669
+        },
+        "point_lookup": {
+          "n": 414,
+          "p50": 12.051,
+          "p99": 16.43
+        }
+      }
+    },
+    {
+      "concurrency": 2,
+      "duration_s": 15.017,
+      "completed": 3061,
+      "errors": 0,
+      "rps": 203.8,
+      "lat_ms": {
+        "p50": 12.212,
+        "p95": 22.353,
+        "p99": 27.143,
+        "max": 31.091,
+        "mean": 9.806
+      },
+      "by_type": {
+        "anchored_expand": {
+          "n": 508,
+          "p50": 12.852,
+          "p99": 19.57
+        },
+        "compute_floor": {
+          "n": 254,
+          "p50": 1.338,
+          "p99": 2.704
+        },
+        "count_all": {
+          "n": 256,
+          "p50": 1.077,
+          "p99": 2.682
+        },
+        "count_user": {
+          "n": 768,
+          "p50": 1.128,
+          "p99": 2.8
+        },
+        "expand_count": {
+          "n": 512,
+          "p50": 21.413,
+          "p99": 29.015
+        },
+        "point_lookup": {
+          "n": 763,
+          "p50": 12.625,
+          "p99": 19.068
+        }
+      }
+    },
+    {
+      "concurrency": 4,
+      "duration_s": 15.025,
+      "completed": 5649,
+      "errors": 0,
+      "rps": 376.0,
+      "lat_ms": {
+        "p50": 12.924,
+        "p95": 24.735,
+        "p99": 29.011,
+        "max": 44.425,
+        "mean": 10.628
+      },
+      "by_type": {
+        "anchored_expand": {
+          "n": 940,
+          "p50": 13.87,
+          "p99": 21.223
+        },
+        "compute_floor": {
+          "n": 468,
+          "p50": 1.395,
+          "p99": 3.768
+        },
+        "count_all": {
+          "n": 472,
+          "p50": 1.181,
+          "p99": 3.196
+        },
+        "count_user": {
+          "n": 1416,
+          "p50": 1.335,
+          "p99": 3.611
+        },
+        "expand_count": {
+          "n": 943,
+          "p50": 23.325,
+          "p99": 31.802
+        },
+        "point_lookup": {
+          "n": 1410,
+          "p50": 13.737,
+          "p99": 21.974
+        }
+      }
+    },
+    {
+      "concurrency": 8,
+      "duration_s": 15.023,
+      "completed": 9806,
+      "errors": 0,
+      "rps": 652.7,
+      "lat_ms": {
+        "p50": 14.535,
+        "p95": 28.476,
+        "p99": 32.708,
+        "max": 47.611,
+        "mean": 12.241
+      },
+      "by_type": {
+        "anchored_expand": {
+          "n": 1629,
+          "p50": 16.037,
+          "p99": 25.796
+        },
+        "compute_floor": {
+          "n": 812,
+          "p50": 1.845,
+          "p99": 5.534
+        },
+        "count_all": {
+          "n": 820,
+          "p50": 1.498,
+          "p99": 5.698
+        },
+        "count_user": {
+          "n": 2460,
+          "p50": 1.652,
+          "p99": 5.941
+        },
+        "expand_count": {
+          "n": 1637,
+          "p50": 26.162,
+          "p99": 36.83
+        },
+        "point_lookup": {
+          "n": 2448,
+          "p50": 15.805,
+          "p99": 25.675
+        }
+      }
+    },
+    {
+      "concurrency": 16,
+      "duration_s": 15.019,
+      "completed": 12657,
+      "errors": 0,
+      "rps": 842.7,
+      "lat_ms": {
+        "p50": 20.238,
+        "p95": 38.478,
+        "p99": 44.772,
+        "max": 71.389,
+        "mean": 18.955
+      },
+      "by_type": {
+        "anchored_expand": {
+          "n": 2098,
+          "p50": 23.08,
+          "p99": 38.533
+        },
+        "compute_floor": {
+          "n": 1045,
+          "p50": 6.341,
+          "p99": 18.547
+        },
+        "count_all": {
+          "n": 1059,
+          "p50": 6.63,
+          "p99": 18.174
+        },
+        "count_user": {
+          "n": 3178,
+          "p50": 6.437,
+          "p99": 19.841
+        },
+        "expand_count": {
+          "n": 2117,
+          "p50": 35.497,
+          "p99": 52.203
+        },
+        "point_lookup": {
+          "n": 3160,
+          "p50": 22.98,
+          "p99": 39.383
+        }
+      }
+    },
+    {
+      "concurrency": 32,
+      "duration_s": 15.025,
+      "completed": 12755,
+      "errors": 0,
+      "rps": 848.9,
+      "lat_ms": {
+        "p50": 36.546,
+        "p95": 66.531,
+        "p99": 81.622,
+        "max": 136.543,
+        "mean": 37.562
+      },
+      "by_type": {
+        "anchored_expand": {
+          "n": 2096,
+          "p50": 40.765,
+          "p99": 78.681
+        },
+        "compute_floor": {
+          "n": 1047,
+          "p50": 23.639,
+          "p99": 62.046
+        },
+        "count_all": {
+          "n": 1072,
+          "p50": 25.044,
+          "p99": 61.826
+        },
+        "count_user": {
+          "n": 3228,
+          "p50": 23.26,
+          "p99": 64.359
+        },
+        "expand_count": {
+          "n": 2135,
+          "p50": 53.749,
+          "p99": 95.299
+        },
+        "point_lookup": {
+          "n": 3177,
+          "p50": 40.845,
+          "p99": 78.88
+        }
+      }
+    }
+  ],
+  "cold": {
+    "query": "count_user",
+    "cold_ms": 1.264
+  }
+}

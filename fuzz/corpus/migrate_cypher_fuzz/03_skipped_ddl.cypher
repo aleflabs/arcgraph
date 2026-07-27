@@ -1,0 +1,2 @@
+CREATE INDEX ON :Person(name);
+CREATE CONSTRAINT ON (p:Person) ASSERT p.id IS UNIQUE;

@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "arcgraph.fullname" . }}-test-livez"
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arcgraph.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:8.7.1
+      command:
+        - sh
+        - -c
+        - |
+          set -eux
+          SVC="{{ include "arcgraph.fullname" . }}-admin.{{ .Release.Namespace }}.svc.cluster.local"
+          PORT="{{ include "arcgraph.adminPort" . }}"
+          # /livez — must return 200 + {"status":"alive"}.
+          curl -sf "http://${SVC}:${PORT}/livez" | grep -q '"status":"alive"'
+          # /readyz — at least one component registered + ready by helm-test phase.
+          curl -sfo /dev/null -w "%{http_code}\n" "http://${SVC}:${PORT}/readyz"

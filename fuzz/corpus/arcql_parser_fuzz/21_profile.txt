@@ -1,0 +1,1 @@
+PROFILE MATCH (n:Person)-[:KNOWS]->(m) RETURN n, m

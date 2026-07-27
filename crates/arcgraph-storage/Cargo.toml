@@ -1,0 +1,114 @@
+[package]
+name = "arcgraph-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Buffer pool, WAL, TEL adjacency, MVCC, and CRUD for ArcGraph."
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+arcgraph-community.workspace = true
+arcgraph-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+crc32c.workspace = true
+crossbeam-channel.workspace = true
+smallvec.workspace = true
+# Issue #247: parallel `rebuild_all_tenant_stats` driver (ADR-038
+# amendment-06 §D-25.2 multi-tenant scaling paragraph). Apache-2.0 OR
+# MIT — verified per workspace Cargo.toml.
+rayon.workspace = true
+# W20β-3 / ADR-052: AES-256-GCM AEAD for WAL + page encryption.
+# Apache-2.0 OR ISC — verified per workspace Cargo.toml comment block.
+# Already transitively pulled by rustls + jsonwebtoken (ADR-049);
+# promoting to a direct workspace dep adds ZERO net new transitive
+# surface. The `default-features` pull aws-lc-sys (the C bindings to
+# the AWS-LC FIPS-validated provider).
+aws-lc-rs.workspace = true
+# W20β-3 / ADR-052: drop-zeroize wrapper for cached encryption keys
+# in the WAL writer's key ring (`KeyRing` struct holds historical
+# versions so old records remain readable across rotation). Already a
+# direct dep of arcgraph-core (W20β-3 §Part A); promoting to a direct
+# dep of arcgraph-storage avoids the `arcgraph_core::SecretValue::expose_bytes()`
+# re-export gymnastics and keeps the encryption module self-contained.
+zeroize.workspace = true
+# W20β-3 / ADR-052 §"Per-page deterministic nonce derivation":
+# `iv = SHA256(page_id || key_version)[..12]`. The sha2 crate is
+# already a workspace dep (used by arcgraph-mcp's OAuth PKCE
+# code-challenge path); promoting to a direct dep of arcgraph-storage
+# adds ZERO net new transitive surface.
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+# M6.2 OOC-1: real data-volume free/total space for the spill headroom
+# gate. `statvfs` is used only on Unix; libc is MIT OR Apache-2.0 and is
+# already workspace-pinned/locked.
+libc.workspace = true
+
+[features]
+# Test-only commit and eviction rendezvous hooks. Off by default so normal
+# production release builds contain neither the hook state nor its call sites.
+fault-injection = []
+
+[dev-dependencies]
+# N-2 (issue #81) test dependency: secondary-index round-trip
+# verification closes the reviewer's "unverified" note from PR #79.
+# arcgraph-index depends on arcgraph-storage's lib; the dev-dep
+# cycle is well-formed because dev-deps are only compiled for tests
+# and resolve against the already-built lib target.
+arcgraph-index = { path = "../arcgraph-index" }
+# Retained index integration tests compose vector, BM25, and community
+# handles through `MultiTenantRouter`. These dev-dependency cycles are
+# well-formed because the crates resolve against the already-built
+# storage library during test compilation.
+arcgraph-bm25 = { path = "../arcgraph-bm25" }
+arcgraph-vector = { path = "../arcgraph-vector" }
+# Used by index integration tests for the HNSW byte-slice contract.
+bytemuck.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+# #811 — pin the ABSENCE of the dual-write "page already mapped" collision
+# WARN (crud.rs commit drain) via the `#[traced_test]` macro from
+# `tracing-test`, layered atop the stronger data-agreement oracle. MIT
+# licensed (verified against `tracing-test 0.2.6` Cargo.toml; entry on
+# deny.toml's allow list). Already in the workspace lock via
+# `arcgraph-core` / `arcgraph-query` dev-deps, so promoting here adds ZERO
+# net new transitive surface. `no-env-filter` lets the per-test subscriber
+# capture the warning without the default env-filter scoping it out.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
+
+# M2.a TEL benches (tel-lead).
+[[bench]]
+name = "tel"
+harness = false
+
+# M2.b MVCC benches (mvcc-lead).
+[[bench]]
+name = "mvcc_throughput"
+harness = false
+
+# M4-04e (issue #210) catalog-stats snapshot benches.
+[[bench]]
+name = "catalog_stats_snapshot"
+harness = false
+
+# v0.1.0-alpha.0 perf baseline — `CrudStoreGraphAdapter::materialize`
+# at 10K / 100K node tenants (issue #248). 1M tenant point is
+# GA-gated by ARCGRAPH_BENCH_MATERIALIZE_FULL_GA.
+[[bench]]
+name = "materialize_bench"
+harness = false
+
+[[bench]]
+name = "permissions_bench"
+harness = false

@@ -1,0 +1,70 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Docker build-context exclusions (W15β M6-03).
+#
+# Goal: minimize the build context sent to the daemon so the layer cache
+# is reused across source-only changes; keep the workspace structure
+# intact (Cargo.toml + Cargo.lock + crates/ are required for
+# `cargo build --workspace`).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Build artifacts — recreated inside the container.
+target
+**/target
+Cargo.lock.bak
+
+# Git metadata — irrelevant to the build. The Dockerfile does not embed
+# a git SHA today (M6-08+ will via build-arg).
+.git
+.gitignore
+.gitattributes
+
+# Fuzz harness — excluded from the workspace per root Cargo.toml; fuzz
+# targets need cargo-fuzz toolchain installation that doesn't fit a
+# release container.
+fuzz
+
+# Top-level integration test placeholder (empty + .gitkeep only).
+tests
+
+# Editor / OS metadata.
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs + local overrides.
+*.log
+.env
+
+# Ruflo / Claude Code agent runtime metadata.
+.claude
+.claude-flow
+.hive-mind
+.swarm
+.mcp.json
+arcgraph-m2d-indices
+
+# Docs — large markdown corpus the container has no use for. Keep the
+# repo root LICENSE (Dockerfile COPYs it into the runtime stage per
+# Apache 2.0 §4(a)) and the README (the release.yml tarball ships it
+# alongside the binary). No NOTICE file exists at HEAD; the original
+# Apache 2.0 NOTICE convention requires one only if the upstream work
+# carries one, which it does not.
+docs
+
+# Benchmark / criterion outputs (defensive — `target/` already excludes
+# them, but local `criterion/` may leak otherwise).
+criterion
+**/criterion
+
+# CI artifacts that don't belong in the image build.
+.github
+BLOCKED-*.md
+m2-prompt.md
+
+# Docker self-reference — avoid sending the Dockerfile + docker-compose
+# back into the build context (compose is dev-only).
+docker-compose.yml
+.dockerignore

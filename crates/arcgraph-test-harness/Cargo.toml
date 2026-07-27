@@ -1,0 +1,45 @@
+[package]
+name = "arcgraph-test-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Reusable workload, dataset, oracle, and fault-injection test helpers for ArcGraph."
+categories.workspace = true
+keywords.workspace = true
+publish = false
+
+[dependencies]
+# Surface workspace IDs (TenantId / Lsn) so domain workloads can pin
+# the snapshot LSN they ran against once M4-61 lands its
+# `ExecutionContext`. Pre-M4-61 the trait carries the field as
+# `Option<Lsn>` and leaves it `None`.
+arcgraph-core.workspace = true
+# `Workload::run` dispatches to the query layer via M4-61's
+# `arcgraph_query::explain::QueryEngine::execute(...)` (which
+# acquires its own `ExecutionContext` + drives the vectorized
+# `Batch` pipeline). Wired live in `workloads::ldbc_snb` post-W11Z
+# flip; sister-Tier-2 workloads keep returning Skipped pending
+# M5-08 ingestion.
+arcgraph-query.workspace = true
+# LDBC SNB SF-1 fixture uses the retained community graph.
+arcgraph-community.workspace = true
+# `arcgraph-storage` is intentionally NOT a dep at v1.0-alpha —
+# the harness routes through `arcgraph-query`'s stub catalog +
+# substrate, not through a real `MultiTenantRouter`. Add when
+# `DatasetHandle::engine_handle` lands at M5-08.
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# MIT — `serial_test` provides the `#[serial]` attribute that
+# serializes BUGGIFY-touching tests in `tests/dst_runtime_seam.rs`
+# against each other under `cargo test --workspace` parallel
+# execution. Replaces per-test local `static SERIAL: Mutex<()>`
+# guards (which were function-local and therefore did NOT
+# synchronize across distinct BUGGIFY-touching tests in the same
+# binary — issue #478 root cause).
+serial_test = "3"

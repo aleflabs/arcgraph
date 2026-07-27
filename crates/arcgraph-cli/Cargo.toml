@@ -1,0 +1,180 @@
+[package]
+name = "arcgraph-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "CLI and server entrypoint for ArcGraph."
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+# W15α M6-02: the `arcgraph` umbrella binary consumes the M6-01
+# umbrella facade — this is the canonical "embedded library" path
+# both an external `cargo add arcgraph` consumer and our own binary
+# share. Adding the umbrella as a direct dep here pins that surface
+# regression-free.
+arcgraph.workspace = true
+arcgraph-core.workspace = true
+arcgraph-storage.workspace = true
+arcgraph-index.workspace = true
+arcgraph-query.workspace = true
+arcgraph-mcp.workspace = true
+# #1023 — production bootstrap wires the Tantivy-backed BM25 store into
+# `CrudStore` + `MultiTenantRouter` so served text/hybrid `graph.search`
+# is reachable through the shipped binaries.
+arcgraph-bm25.workspace = true
+# #765 PART-1 — the served HNSW vector-search provider
+# (`vector_search::HnswVectorSearchProvider`) wraps `arcgraph-vector`'s
+# `HnswGraph` engine behind the `arcgraph-mcp` `SubstrateSearchProvider` trait.
+# The binary is the bounded-context-correct home for the concrete impl (ADR-132
+# §"production binding"): `arcgraph-mcp` defines the trait but does NOT depend on
+# `arcgraph-vector`. Workspace crate, Apache/MIT (PD#1); no new external ANN dep.
+arcgraph-vector.workspace = true
+anyhow.workspace = true
+# M5-D2 — `arcgraph check` prints a crc32c over the hydrated property
+# bags of its bounded served-store sample (the cold-open-serves-props
+# diagnostic). Already workspace-pinned and a production dependency of
+# arcgraph-storage (Apache-2.0/MIT, PD#1); promoted from dev-deps.
+crc32c.workspace = true
+tracing.workspace = true
+# W13δ M5-01 fix-up — `arcgraph-mcp-stdio` binary wraps
+# `arcgraph_mcp::serve_stdio` + binds SIGTERM via
+# `arcgraph_mcp::shutdown_on_term` (the tokio::signal handle the
+# library exposes for production callers per
+# `transport/stdio.rs:242-277`). Workspace-pinned features (already
+# enabled at the root): `rt-multi-thread` (multi-thread runtime
+# anchors the M5-02 streamable-HTTP forward-zero-cost shape), `macros`
+# for `#[tokio::main]`, `io-std` for `tokio::io::{stdin,stdout}`,
+# `signal` for the SIGTERM handler. W15α M6-02 adds `process` for
+# the `Command`-based subcommand integration tests.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "signal", "net", "time", "sync"] }
+# W15α M6-02 — `arcgraph` umbrella CLI binary. License-verified at
+# the workspace `[workspace.dependencies]` entry.
+clap.workspace = true
+# W15α M6-02 — JSON dump format. Already a direct workspace dep
+# (introduced for the MCP TOON serializer); promoted here for the
+# `arcgraph dump --format json` output path.
+serde_json.workspace = true
+# W18δ — `arcgraph migrate from-neo4j-*` parser errors.
+thiserror.workspace = true
+# W24-OPS-α — admin HTTP server (livez/readyz) + tracing-subscriber
+# registry init + OTLP-gRPC tracing exporter.
+# Each dep is workspace-pinned with full license + comment + minimal-
+# feature discipline applied at the workspace `[workspace.dependencies]`
+# entries.
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing-subscriber.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
+# Serialization used by CLI configuration and output records.
+serde = { workspace = true }
+# ADR-204: per-file SHA-256 in the backup manifest (verify-what-you-
+# wrote). Workspace dep; Apache-2.0/MIT dual — cargo-deny gates live.
+sha2 = { workspace = true }
+# W24-OPS-α — readiness gate uses `parking_lot::RwLock<HashMap>` for
+# the per-component state map (cheap fast-path read by /readyz).
+# Already transitive workspace-wide; promoting adds ZERO net new
+# transitive surface.
+parking_lot.workspace = true
+# #761 slice 2 — `serve --bolt --bolt-auth-jwks <file>` loads operator-staged
+# JWKS JSON (RFC 7517 JWK Set) to build the `OAuthConfig` that gates Bolt HELLO
+# bearer auth. `jsonwebtoken::jwk::JwkSet` is the deserializer; `DecodingKey::
+# from_jwk` builds the per-key verifier. Apache-2.0 OR MIT (Prime Directive #1) —
+# same workspace pin already consumed by `arcgraph-mcp` for JWT signature verification.
+jsonwebtoken.workspace = true
+
+# #886 — durable `--data` exclusive inter-process advisory lock
+# (`src/data_lock.rs`). Unix uses `libc::flock(LOCK_EX|LOCK_NB)` (a
+# contained `unsafe` FFI with a `// SAFETY:` block per Prime Directive #3);
+# windows uses std `share_mode(0)` and needs NO FFI, so `libc` is pulled in
+# ONLY on unix. MIT OR Apache-2.0 (Prime Directive #1); already vendored
+# transitively (in `Cargo.lock` at 0.2.x) → zero net new transitive surface.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[features]
+default = []
+# ADR-216 §D-4 / #1180 — activate `arcgraph-core/os-keyring` so the WAL
+# `KeySource` can resolve its KEK from the OS keyring (macOS Keychain /
+# Windows Credential Manager / Linux Secret Service). OFF by default so the
+# shipped binary + headless CI build without the Secret Service / D-Bus
+# system dep; production deployments wanting WAL encryption with the keyring
+# provider build `cargo build -p arcgraph-cli --features os-keyring`. The
+# `env` secrets provider (dev) needs no feature. Adds ZERO new crates — it
+# activates the already-vendored optional `keyring` dep (ADR-216 §D-5).
+os-keyring = ["arcgraph-core/os-keyring"]
+# Reliability gates only: compile deterministic crash seams used by the
+# release-mode migration/attach subprocess tests. Production builds keep this
+# feature off, so no fault hook is present on the publish path. Forwards to
+# arcgraph-storage so the M5 build-isolation gates can pollute live census
+# structures (buffer-pool phantom map, injected write-behind routes) in
+# their armed RED-control arms.
+fault-injection = ["arcgraph-storage/fault-injection"]
+
+[[bin]]
+# #899 — the `--bin` TARGET name is the hyphenated `arcgraph-mcp-stdio`
+# (Cargo bin names are kebab-case). Build/run it as
+# `cargo build -p arcgraph-cli --bin arcgraph-mcp-stdio`. The source
+# `path` filename uses underscores (`arcgraph_mcp_stdio.rs`), so do NOT
+# pass `--bin arcgraph_mcp_stdio` — Cargo rejects it ("no bin target
+# named `arcgraph_mcp_stdio`"). This `name` field is the canonical target.
+name = "arcgraph-mcp-stdio"
+path = "src/bin/arcgraph_mcp_stdio.rs"
+
+# W15α M6-02 — umbrella CLI binary. Three subcommands: serve / check /
+# dump. Wraps the M6-01 `arcgraph` umbrella facade.
+#
+# `doc = false` resolves a `cargo doc --workspace` filename collision
+# between this bin target and the `arcgraph` umbrella **lib** target
+# at `crates/arcgraph/`: both want to emit `target/doc/arcgraph/`.
+# bin-target rustdoc is rarely useful (consumers read it via `--help`
+# or `man`), so we suppress it; the umbrella lib's `cargo doc` output
+# is the canonical reference for the embedded surface.
+[[bin]]
+name = "arcgraph"
+path = "src/bin/arcgraph.rs"
+doc = false
+
+[dev-dependencies]
+# Re-arm the bounded owner-row Phase-1 rendezvous only for CLI integration
+# tests; the shipped storage dependency remains feature-off.
+arcgraph-storage = { workspace = true, features = ["fault-injection"] }
+# Both already workspace-pinned; promoted to dev-dep here for the W13δ
+# fix-up subprocess test (`tests/mcp_stdio_subprocess.rs`) and the
+# W15α M6-02 `arcgraph` umbrella CLI subprocess tests.
+serde_json.workspace = true
+# M4 Slice-2 production-bootstrap gates build real v9 physical deltas.
+bytes.workspace = true
+# #1450: `tests/served_ssd_tier_e2e_1292.rs` mutates process-global tier/dir/
+# RSS_CAP env vars and shares a process-wide RssGuard sampler; `#[serial]`
+# serializes those tests so parallel runs can't race the env state (was a
+# pre-existing flake, exposed by the REMOVE-path test addition). serial_test
+# is already license-vetted + used by arcgraph-test-harness / arcgraph-index /
+# arcgraph-storage dev-deps (same "3" pin, Cargo.lock 3.4.0); MIT.
+serial_test = "3"
+# W25-OPS-PROD: helm chart shape tests (tests/w25_helm_chart_shape.rs)
+# parse Chart.yaml + values.yaml + helm-rendered output. Apache-2.0
+# OR MIT per the workspace's license-audit allow list.
+serde_yaml.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "net", "time", "macros", "rt-multi-thread"] }
+# #761 slice 1 — `tests/serve_http_tls_e2e.rs` is the ADR-133 §D-4
+# "Driver" e2e: it stages an `rcgen` self-signed cert, spawns
+# `arcgraph serve --http`, and drives a real `tokio_rustls` TLS client
+# through one MCP JSON-RPC roundtrip over `POST /mcp`. All Apache-2.0 OR
+# MIT (Prime Directive #1): `rcgen` / `time` mirror the `arcgraph-mcp`
+# dev-dep declarations (verified there 2026-05-10); `rustls` /
+# `tokio-rustls` are the same workspace pins the production HTTP
+# transport already consumes.
+rcgen = "0.14"
+time = "0.3"
+rustls.workspace = true
+tokio-rustls.workspace = true

@@ -1,0 +1,132 @@
+{
+  "addr": "127.0.0.1:7687",
+  "n": 5000,
+  "dim": 128,
+  "k": 10,
+  "seed": 765,
+  "surface": "CALL db.index.vector.queryNodes (Bolt, un-throttled)",
+  "duration_s": 15.0,
+  "warmup_s": 4.0,
+  "smoke": {
+    "served": true,
+    "rows": 10,
+    "top_vids": [
+      0,
+      2696,
+      3853,
+      1373,
+      1803,
+      513,
+      556,
+      3036,
+      1609,
+      2728
+    ],
+    "self_is_rank1": true,
+    "error": null
+  },
+  "recall": {
+    "queries": 200,
+    "k": 10,
+    "recall_at_k": 0.9945,
+    "min_q": 0.9,
+    "perfect_q": 189,
+    "examples": [
+      "q5: exact=[849, 1066, 1219, 1413, 1737, 2712, 2959, 4075, 4149, 4151] got=[788, 849, 1066, 1219, 1413, 1737, 2712, 4075, 4149, 4151]",
+      "q8: exact=[943, 1497, 1629, 2642, 2816, 3754, 3935, 4154, 4801, 4930] got=[943, 1338, 1497, 1629, 2642, 2816, 3754, 3935, 4801, 4930]",
+      "q17: exact=[806, 1610, 2661, 2895, 3065, 3078, 3315, 3373, 3932, 3985] got=[806, 1610, 1939, 2661, 2895, 3065, 3078, 3373, 3932, 3985]"
+    ]
+  },
+  "levels": [
+    {
+      "concurrency": 1,
+      "duration_s": 15.001,
+      "completed": 18468,
+      "errors": 0,
+      "rps": 1231.2,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 0.798,
+        "p95": 0.902,
+        "p99": 1.044,
+        "max": 3.472,
+        "mean": 0.812
+      }
+    },
+    {
+      "concurrency": 2,
+      "duration_s": 15.001,
+      "completed": 29582,
+      "errors": 0,
+      "rps": 1972.0,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 1.008,
+        "p95": 1.067,
+        "p99": 1.124,
+        "max": 8.242,
+        "mean": 1.014
+      }
+    },
+    {
+      "concurrency": 4,
+      "duration_s": 15.001,
+      "completed": 43640,
+      "errors": 0,
+      "rps": 2909.2,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 1.317,
+        "p95": 1.957,
+        "p99": 2.394,
+        "max": 8.943,
+        "mean": 1.375
+      }
+    },
+    {
+      "concurrency": 8,
+      "duration_s": 15.001,
+      "completed": 34434,
+      "errors": 0,
+      "rps": 2295.4,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 3.365,
+        "p95": 5.081,
+        "p99": 6.392,
+        "max": 35.003,
+        "mean": 3.484
+      }
+    },
+    {
+      "concurrency": 16,
+      "duration_s": 15.002,
+      "completed": 33994,
+      "errors": 0,
+      "rps": 2265.9,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 6.794,
+        "p95": 11.009,
+        "p99": 14.301,
+        "max": 38.124,
+        "mean": 7.059
+      }
+    },
+    {
+      "concurrency": 32,
+      "duration_s": 15.005,
+      "completed": 32853,
+      "errors": 0,
+      "rps": 2189.5,
+      "error_examples": [],
+      "lat_ms": {
+        "p50": 14.122,
+        "p95": 22.415,
+        "p99": 28.042,
+        "max": 62.432,
+        "mean": 14.606
+      }
+    }
+  ]
+}

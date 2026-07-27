@@ -1,0 +1,248 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ArcGraph Helm values — v1.0-GA defaults.
+#
+# Conservative defaults: loopback-default admin endpoint, single-replica
+# StatefulSet (single-writer engine — see replicaCount below), distroless
+# non-root container, NetworkPolicy restricting admin-port traffic to the
+# Kubernetes control plane.
+#
+# Per ADR-093-amendment-01 §D-4: override-friendly via
+# `helm install arcgraph . -f my-values.yaml` or per-key via
+# `--set image.tag=v1.0.1`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Image ────────────────────────────────────────────────────────────
+image:
+  # Override with operator's registry for air-gapped deployments.
+  repository: arcgraph
+  # Pinned to v1.0-alpha at chart debut. Operators bump alongside
+  # upgrades; the chart appVersion sets this default but values.yaml
+  # wins on `--set`.
+  tag: v1.0-alpha
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# ── Replicas + StatefulSet shape ─────────────────────────────────────
+# MUST be 1. ArcGraph is a single-writer, thread-per-core engine
+# (design-v2 §4.1 "The thread model": a thread-per-core primary pool +
+# a small Tokio work-stealing background pool) backed by a single durable
+# `--data` page store + WAL. replicaCount > 1 is unsupported:
+#   • sharing one PVC across replicas ⇒ two writers on the same
+#     `pages.db` + `wal/` ⇒ split-brain / corruption; and
+#   • per-replica PVCs create independent databases with divergent state.
+# Keep this at 1. Operators needing more read capacity should scale
+# vertically (resources below).
+replicaCount: 1
+
+statefulSet:
+  serviceName: arcgraph-headless
+  # Persistent volume claim shape per replica. Sized for v1.0-GA "small
+  # deployment" — operators with larger workloads override at install
+  # time.
+  persistence:
+    enabled: true
+    storageClassName: ""  # empty → default storage class
+    accessModes:
+      - ReadWriteOnce
+    size: 20Gi
+    # W28 / ADR-183 (durable-by-default): the durable data dir
+    # (`pages.db` + `wal/`) passed to `arcgraph serve --data`. When
+    # `enabled: false` the chart passes `--in-memory` instead and this
+    # value is unused.
+    dataDir: /var/lib/arcgraph/data
+  # Topology spread — schedule each replica on a different node by
+  # default. Operators with multi-zone clusters override topologyKey
+  # to topology.kubernetes.io/zone.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: arcgraph
+
+# ── Probes (ADR-093 §D-1) ────────────────────────────────────────────
+probes:
+  liveness:
+    path: /livez
+    port: 8090
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    port: 8090
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  startup:
+    path: /livez
+    port: 8090
+    # WAL replay can take O(minutes) for a multi-GB segment chain at
+    # cold start; startup probe gives the process up to 5 minutes
+    # before liveness/readiness probes kick in.
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 60
+
+# ── Admin HTTP bind (W14 retro IR L1-HIGH-4) ─────────────────────────
+# Kubernetes httpGet probes originate from the host network namespace
+# and cannot reach a 127.0.0.1-bound listener inside the pod's
+# network namespace. The admin HTTP server requires explicit operator
+# opt-in for non-loopback binds. By default this chart sets the bind
+# to 0.0.0.0:8090 + sets `--allow-remote-admin-bind` so the K8s
+# httpGet probes succeed.
+#
+# The NetworkPolicy below restricts admin-port traffic to the
+# kube-system namespace; operators MUST keep this constraint or
+# manually configure an equivalent egress restriction.
+admin:
+  bind: "0.0.0.0:8090"
+  allowRemoteBind: true
+
+# ── MCP transport ────────────────────────────────────────────────────
+# v1.0-α ships stdio-MCP; HTTP-MCP wires cert/key at M6-08+. The
+# `serve --stdio-mcp` arg matches the deploy/k8s/statefulset.yaml
+# reference; operators wiring HTTP-MCP override `args`. (The durable
+# `--data` / `--in-memory` storage-mode arg is emitted ahead of the
+# transport arg per `statefulSet.persistence.enabled` above — W28 /
+# ADR-183.)
+mcp:
+  transport: stdio  # one of: stdio | http
+  http:
+    port: 8080
+    # cert/key paths in-pod; reference operator's TLS secret via
+    # tls.secretName below.
+    certPath: /etc/arcgraph/tls/tls.crt
+    keyPath: /etc/arcgraph/tls/tls.key
+
+# ── TLS (forward-bound) ──────────────────────────────────────────────
+tls:
+  enabled: false  # v1.0-α deployments OK without TLS (loopback-only)
+  # When enabled, mounts the named Kubernetes Secret at
+  # /etc/arcgraph/tls/ — must contain tls.crt + tls.key.
+  secretName: ""
+
+# ── Resources ────────────────────────────────────────────────────────
+# Sized for v1.0-α "small deployment". Override per workload.
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: 2
+    memory: 4Gi
+
+# ── Pod Disruption Budget ────────────────────────────────────────────
+podDisruptionBudget:
+  enabled: true
+  # Single-writer engine (replicaCount: 1): the sole pod IS the database.
+  # `maxUnavailable: 0` blocks voluntary disruptions (e.g. node drains)
+  # from evicting the only writer — the eviction is deferred until the
+  # operator explicitly handles it, rather than silently taking the
+  # whole database down.
+  maxUnavailable: 0
+
+# ── Service account ──────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  # Annotations for IRSA / Workload Identity / AKS Managed Identity.
+  annotations: {}
+  name: ""  # default: chart-name
+
+# ── Pod security context ─────────────────────────────────────────────
+podSecurityContext:
+  # distroless cc-debian12:nonroot ships UID/GID 65532.
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ── Service ──────────────────────────────────────────────────────────
+service:
+  # Headless service (for StatefulSet stable DNS) is always created;
+  # the LB service is opt-in for environments that want external
+  # access to the MCP transport.
+  headless:
+    enabled: true
+  loadBalanced:
+    enabled: false
+    type: ClusterIP
+    annotations: {}
+  admin:
+    # The admin service exposes /livez + /readyz + /cost — restrict
+    # via the NetworkPolicy below.
+    enabled: true
+    type: ClusterIP
+
+# ── NetworkPolicy ────────────────────────────────────────────────────
+# Locks down admin-port access to the kube-system namespace by default.
+# Operators with custom probe sources extend `admin.from`.
+networkPolicy:
+  enabled: true
+  ingress:
+    mcp:
+      # By default, allow MCP traffic from any pod in the same
+      # namespace. Operators with stricter postures override to
+      # explicit podSelector / namespaceSelector lists.
+      from:
+        - podSelector: {}
+    admin:
+      # Probe traffic + operator-side observability tooling only.
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+
+# ── Environment overrides (passed to ConfigMap envFrom) ──────────────
+env:
+  # tracing / log level (per ADR-093 §D-2 default).
+  RUST_LOG: "warn,arcgraph_cli=info,arcgraph_mcp=info,arcgraph_storage=info"
+  # OTLP-gRPC endpoint (per ADR-093 §D-2). Unset → stderr-only tracing.
+  ARCGRAPH_OTLP_ENDPOINT: ""
+  ARCGRAPH_OTLP_SERVICE_NAME: "arcgraph"
+  ARCGRAPH_OTLP_TIMEOUT_MS: "5000"
+  # Tokio worker count (Monoio is per-core; Tokio default = num_cpus,
+  # override for sizing-sensitive deployments).
+  TOKIO_WORKER_THREADS: ""
+
+# ── Node placement ───────────────────────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ── Annotations + labels ─────────────────────────────────────────────
+commonLabels: {}
+commonAnnotations: {}
+podLabels: {}
+podAnnotations:
+  # Auto-scrape by Prometheus if the operator's instance honors the
+  # convention. Set to "false" to disable.
+  prometheus.io/scrape: "false"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+
+# ── ServiceMonitor (Prometheus Operator) ─────────────────────────────
+serviceMonitor:
+  enabled: false
+  # Namespace where the Prometheus Operator runs.
+  namespace: ""
+  labels: {}
+  interval: 30s
+  scrapeTimeout: 10s

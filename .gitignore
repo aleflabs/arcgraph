@@ -1,0 +1,60 @@
+# Rust build artifacts
+/target
+**/target
+Cargo.lock.bak
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmark artifacts
+/target/criterion
+
+# Fuzz artifacts
+# W22-DB-ε: per-target seed corpora under `fuzz/corpus/<target>/` are
+# load-bearing per ADR-079 Pillar 1; we track hand-crafted named
+# seeds (e.g., `01_simple_match.txt`) and ignore only the 40-char-
+# hex SHA1 filenames libFuzzer emits at runtime.
+fuzz/artifacts/
+fuzz/coverage/
+fuzz/target/
+
+# Logs
+*.log
+
+# Local overrides
+/.env
+
+# Claude Code / Ruflo runtime metadata
+/.claude/
+/.claude-flow/
+/.hive-mind/
+/.swarm/
+/.mcp.json
+arcgraph-m2d-indices
+
+# Python bytecode (scripts/ tooling; W28-S546 coverage parser tests)
+__pycache__/
+*.pyc
+
+# Documentation publication boundary. New root documents, unlisted root
+# trees, and nested ADR workspaces require an explicit publication decision.
+/docs/*.md
+/docs/*/
+!/docs/adr/
+!/docs/chaos/
+!/docs/conformance/
+!/docs/deploy/
+!/docs/design/
+!/docs/grafana/
+!/docs/migration/
+!/docs/operations/
+!/docs/security/
+/docs/adr/*/

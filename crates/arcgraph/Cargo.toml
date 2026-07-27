@@ -1,0 +1,43 @@
+[package]
+name = "arcgraph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "ArcGraph database engine facade for storage, indexes, queries, and protocol access."
+# crates.io accepts a maximum of 5 keywords; spawn-prompt-pinned set
+# tuned for "embedded graph + vector DB w/ MCP agent surface".
+keywords = ["graph", "graph-database", "vector", "mcp", "ai"]
+# crates.io requires every listed category be in the official taxonomy
+# (`cargo categories`). Both selections are present in the v1.0 list
+# (verified `cargo info` against the taxonomy 2026-05-11):
+# - "database-implementations" — primary classification.
+# - "concurrency" — secondary, reflects the thread-per-core executor
+#   surface re-exported via arcgraph-storage / arcgraph-query.
+categories = ["database-implementations", "concurrency"]
+
+[dependencies]
+# All workspace deps — license-allowlisted at the root manifest. W15α
+# F-2 fix-up: round-1 reviewer flagged the umbrella's substrate-omission
+# gap (PR #306 round-1 review §"F-2 — Umbrella surface omits index /
+# vector / bm25 / community"). The four substrate crates are pulled in
+# additively here so a downstream `cargo add arcgraph` user sees the
+# full graph, vector, text-search, and traversal surface promised by the
+# crate `description` field above. `cargo deny check` re-runs clean
+# (these crates share license + transitive surface with the existing
+# 4-crate umbrella; no net new dep landing).
+arcgraph-core.workspace = true
+arcgraph-storage.workspace = true
+arcgraph-index.workspace = true
+arcgraph-vector.workspace = true
+arcgraph-bm25.workspace = true
+arcgraph-community.workspace = true
+arcgraph-query.workspace = true
+arcgraph-mcp.workspace = true
+
+[[example]]
+name = "embedded_quickstart"
+path = "examples/embedded_quickstart.rs"

@@ -1,0 +1,1 @@
+MERGE (n:User {id: 42}) ON CREATE SET n.name = "Bob" ON MATCH SET n.seen = 1

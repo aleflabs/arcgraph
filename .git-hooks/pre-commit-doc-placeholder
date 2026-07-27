@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Pre-commit hook: doc placeholder check.
+#
+# Mirrors .github/workflows/doc-placeholder-check.yml. Local feedback for
+# developers who opt in. CI is the load-bearing gate; this is convenience.
+#
+# Install (opt-in):
+#   ln -s ../../.git-hooks/pre-commit-doc-placeholder .git/hooks/pre-commit
+#
+# Pattern: PR #N(, YYYY-MM-DD)?  OR  <pending ... PR number>
+# Scope:   docs/**/*.md.
+
+set -euo pipefail
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM \
+           | { grep -E '^docs/.*\.md$' || true; })
+
+if [ -z "$STAGED" ]; then
+    exit 0
+fi
+
+# `xargs grep ... || true` so we don't exit non-zero on no-match.
+MATCHES=$(echo "$STAGED" | xargs grep -nE \
+           'PR #N(,[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2})?|<pending[^>]*PR number>' \
+           2>/dev/null || true)
+
+if [ -n "$MATCHES" ]; then
+    echo "ERROR: unbackfilled PR-number placeholder(s) detected in staged docs:" >&2
+    echo "$MATCHES" >&2
+    echo "" >&2
+    echo "Backfill the placeholder to the actual PR number." >&2
+    exit 1
+fi
+
+exit 0

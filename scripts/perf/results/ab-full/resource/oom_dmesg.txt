@@ -1,0 +1,49 @@
+# OOM dmesg snippet — evidence for issue #1404 (ingest-time RSS unbounded)
+#
+# Host: OCI VM measurement host (16c/62GB). SANITIZED — no raw IP/hostname.
+# Captured via `sudo dmesg -T | grep -iE 'out of memory|killed process|arcgraph-mcp|oom-kill'`.
+#
+# THE DECISIVE LINE for #1404 is the LAST kill below (Sat Jul  4 13:58:38 2026,
+# cgroup `ag-10m-stream2.scope`):
+#
+#   Memory cgroup out of memory: Killed process (arcgraph-mcp-st)
+#   total-vm:40962476kB, anon-rss:38975644kB  (== ~39 GB server RSS)
+#
+# Why this line proves "server, not harness":
+#   - constraint=CONSTRAINT_MEMCG, cgroup=ag-10m-stream2.scope  -> the 40G-capped
+#     ingest cgroup, NOT a global/uncapped kill.
+#   - This run used the STREAMING loader (ingest_load_streaming.py), whose python
+#     client held ~26MB — so the 39GB anon-rss is the ArcGraph server alone.
+#   - It died at ~1,995,000 nodes (harness log ag_10m_stream2.log: "400 reqs,
+#     1995000 nodes ... 439s") -> 10M is not reachable under a realistic 40G cap.
+#
+# The other kills are earlier confounded runs kept for context:
+#   - 18:05:47 (arcgraph-1m-serve.scope, anon-rss 41.8GB): a 40G-capped serve OOM.
+#   - 21:23:32 and 13:13:22 (session .scope, CONSTRAINT_NONE / global_oom, ~41GB):
+#     the harness json.load(4.3GB) + server on an UNCAPPED box — the confound that
+#     motivated writing the streaming loader. NOT clean evidence; shown for honesty.
+#   - 13:34:59 (ag-10m-ingest.scope, anon-rss 21.1GB): an earlier cgroup ingest.
+#
+# ------------------------------------------------------------------------------
+
+[Fri Jul  3 18:05:47 2026] tokio-rt-worker invoked oom-killer: gfp_mask=0x100cca(GFP_HIGHUSER_MOVABLE), order=0, oom_score_adj=0
+[Fri Jul  3 18:05:47 2026] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=arcgraph-1m-serve.scope,mems_allowed=0,oom_memcg=/system.slice/arcgraph-1m-serve.scope,task_memcg=/system.slice/arcgraph-1m-serve.scope,task=arcgraph,pid=<pid>,uid=0
+[Fri Jul  3 18:05:47 2026] Memory cgroup out of memory: Killed process <pid> (arcgraph) total-vm:45526200kB, anon-rss:41857536kB, file-rss:8944kB, shmem-rss:0kB, UID:0 pgtables:82552kB oom_score_adj:0
+[Fri Jul  3 18:05:51 2026] oom_reaper: reaped process <pid> (arcgraph), now anon-rss:0kB, file-rss:88kB, shmem-rss:0kB
+
+[Fri Jul  3 21:23:32 2026] tokio-rt-worker invoked oom-killer: gfp_mask=0x140dca(GFP_HIGHUSER_MOVABLE|__GFP_ZERO|__GFP_COMP), order=0, oom_score_adj=0
+[Fri Jul  3 21:23:32 2026] oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=user.slice,mems_allowed=0,global_oom,task_memcg=<session-scope>,task=arcgraph-mcp-st,pid=<pid>,uid=1001
+[Fri Jul  3 21:23:32 2026] Out of memory: Killed process <pid> (arcgraph-mcp-st) total-vm:59975472kB, anon-rss:41232792kB, file-rss:2316kB, shmem-rss:0kB, UID:1001 pgtables:81232kB oom_score_adj:0
+[Fri Jul  3 21:23:36 2026] oom_reaper: reaped process <pid> (arcgraph-mcp-st), now anon-rss:0kB, file-rss:40kB, shmem-rss:0kB
+
+[Sat Jul  4 13:13:22 2026] oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=user.slice,mems_allowed=0,global_oom,task_memcg=<session-scope>,task=arcgraph-mcp-st,pid=<pid>,uid=1001
+[Sat Jul  4 13:13:22 2026] Out of memory: Killed process <pid> (arcgraph-mcp-st) total-vm:47041612kB, anon-rss:41222224kB, file-rss:2320kB, shmem-rss:0kB, UID:1001 pgtables:81104kB oom_score_adj:0
+
+[Sat Jul  4 13:34:59 2026] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=ag-10m-ingest.scope,mems_allowed=0,oom_memcg=/system.slice/ag-10m-ingest.scope,task_memcg=/system.slice/ag-10m-ingest.scope,task=arcgraph-mcp-st,pid=<pid>,uid=0
+[Sat Jul  4 13:34:59 2026] Memory cgroup out of memory: Killed process <pid> (arcgraph-mcp-st) total-vm:23919336kB, anon-rss:21152780kB, file-rss:2428kB, shmem-rss:0kB, UID:0 pgtables:41736kB oom_score_adj:0
+
+# ==> #1404 DECISIVE EVIDENCE (streaming loader, 40G cgroup cap, ~1.995M nodes):
+[Sat Jul  4 13:58:38 2026] tokio-rt-worker invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=0
+[Sat Jul  4 13:58:38 2026] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=ag-10m-stream2.scope,mems_allowed=0,oom_memcg=/system.slice/ag-10m-stream2.scope,task_memcg=/system.slice/ag-10m-stream2.scope,task=arcgraph-mcp-st,pid=<pid>,uid=0
+[Sat Jul  4 13:58:38 2026] Memory cgroup out of memory: Killed process <pid> (arcgraph-mcp-st) total-vm:40962476kB, anon-rss:38975644kB, file-rss:8300kB, shmem-rss:0kB, UID:0 pgtables:76620kB oom_score_adj:0
+[Sat Jul  4 13:58:42 2026] oom_reaper: reaped process <pid> (arcgraph-mcp-st), now anon-rss:0kB, file-rss:0kB, shmem-rss:0kB

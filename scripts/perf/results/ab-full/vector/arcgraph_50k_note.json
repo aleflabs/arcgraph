@@ -1,0 +1,1 @@
+{"tier":"50k","engine":"arcgraph","queryNodes_served":true,"warm_knn_ms":12,"note":"serves fine; harness recall-oracle (50k brute-force numpy) too slow → smoke-timeout in harness, NOT an engine limit"}

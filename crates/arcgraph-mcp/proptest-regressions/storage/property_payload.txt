@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 20b4a892a72af7cb6ef47448e3e4816efb2c6aca1f46ce10d5e8da4ba15c52b2 # shrinks to bag = {"a": Float(-3.585644775511125e-82)}

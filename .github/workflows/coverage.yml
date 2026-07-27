@@ -1,0 +1,270 @@
+name: Coverage (per-crate, WARN-mode)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# W28 Task #546 (Feature #529) — per-crate line-coverage report.
+#
+# WARN-MODE / INFORMATIONAL ONLY. This job MEASURES per-crate line coverage
+# (cargo-tarpaulin, Linux), renders a per-crate table, and FLAGS any crate
+# below the 80% target (`docs/testing-strategy.md` §4) or that regressed
+# > 1.0pp vs base — but it does **NOT** block merge. The strategy's §6 lists
+# the `coverage` job as "Informational". The flip to a BLOCKING required check
+# is a Director decision affecting ALL tracks; it is intentionally NOT enabled
+# here. See `docs/coverage-gate.md` §"Flip-to-blocking (Director sign-off)".
+#
+# This is a NEW, standalone workflow file (it does NOT edit ci.yml) to avoid
+# cross-track conflict on the shared CI surface (per the W28-S546 spawn scope).
+#
+# Locally we do NOT run workspace tarpaulin (heavy instrumented build → RAM
+# crash). The parser at `scripts/coverage_check.py` is unit-
+# tested without tarpaulin (`scripts/test_coverage_check.py`); CI is the
+# authority that runs tarpaulin.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Trigger scope (CI-cost optimization, 2026-06-02):
+#   This job is INFORMATIONAL / WARN-MODE (see header) — it is NOT a
+#   required status check (only the `CI` workflow gates merges), so it
+#   does not need to re-measure on every intermediate PR commit.
+#   - `push` to main → authoritative per-crate coverage baseline +
+#     the cache that PRs restore for the >1pp regression delta.
+#   - `pull_request` types deliberately EXCLUDE `synchronize`: the
+#     ~11.7-min instrumented tarpaulin build fired on every push to a
+#     PR branch was the dominant avoidable cost (a fast-pushing PR
+#     could trigger it 5-10× before merge). We post the informational
+#     sticky coverage comment once when the PR is opened / reopened /
+#     marked ready-for-review; that is sufficient for a warn-mode
+#     signal. Authors who want a fresh mid-PR coverage read use the
+#     manual `workflow_dispatch` below (or rely on the main baseline
+#     once merged). The merge-blocking correctness gate is ci.yml's
+#     `test` job, which is unaffected and still runs per synchronize.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  # On-demand fresh coverage read mid-PR (replaces the per-synchronize
+  # auto-run; opt-in keeps the informational signal available without
+  # the per-commit cost).
+  workflow_dispatch: {}
+
+# Least-privilege: read the repo + write PR comments (the informational
+# sticky comment). Fork PRs receive a read-only token; the comment step is
+# `continue-on-error` so that case degrades to the job-summary table only —
+# warn-mode never fails on a missing permission.
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  # Panic-by-default env-gates: tarpaulin runs the instrumented test binaries,
+  # so the same gated suites that ci.yml skips would PANIC here without these
+  # opt-outs (per feedback_test_env_gate_panic_by_default.md). This block MUST
+  # stay in sync with ci.yml's env block + the SPAWN_PROMPT_PREAMBLE addendum-19
+  # canonical template (feedback_panic_by_default_gates_require_template_sync.md).
+  ARCGRAPH_PROMTOOL_SKIP_OK: "1"
+  ARCGRAPH_HADOLINT_SKIP_OK: "1"
+  ARCGRAPH_ACTIONLINT_SKIP_OK: "1"
+  ARCGRAPH_DOCKER_SKIP_OK: "1"
+  ARCGRAPH_TCK_SKIP_OK: "1"
+  ARCGRAPH_DRIVER_COMPAT_SKIP_OK: "1"
+  ARCGRAPH_W22DB_RETRIEVAL_SKIP_OK: "1"
+  ARCGRAPH_DST_SKIP_OK: "1"
+  ARCGRAPH_SUBPROCESS_SMOKE_SKIP_OK: "1"
+  ARCGRAPH_MVCC_BENCH_SKIP_OK: "1"
+  ARCGRAPH_W25_CHAOS_SKIP_OK: "1"
+  ARCGRAPH_W25_SOAK_SKIP_OK: "1"
+  ARCGRAPH_W25_SKIP_HELM_LINT: "1"
+
+jobs:
+  coverage:
+    name: per-crate line coverage (informational)
+    runs-on: ubuntu-latest
+    # Skip draft PRs (parity with ci.yml) — warn-mode reporting on a draft is
+    # noise; it runs on `ready_for_review`.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Parser self-test FIRST: cheap (~ms), pure Python, no tarpaulin. If the
+      # parser logic is broken there is no point running the heavy tarpaulin
+      # build. This is deterministic so it is allowed to fail the (non-required)
+      # job — it signals parser breakage.
+      - name: Parser self-test (no tarpaulin)
+        run: python3 scripts/test_coverage_check.py
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Install a prebuilt cargo-tarpaulin binary (seconds vs ~4min compile).
+      # taiki-e/install-action is dual MIT/Apache-2.0 licensed (CI tooling, not
+      # a crate dependency — Prime Directive #1 governs crate deps); cargo-
+      # tarpaulin itself is MIT/Apache-2.0.
+      - name: Install cargo-tarpaulin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+
+      # Restore the per-crate baseline produced by the latest `main` run (for
+      # the >1pp regression flag). Best-effort: absent on first run / after
+      # cache eviction → the parser skips the regression check and reports
+      # only the <80% flag (warn-mode). The PR token can read caches created
+      # on the base branch (main); `restore-keys` prefix-matches the newest.
+      - name: Restore coverage baseline (from main)
+        id: baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: coverage-baseline.json
+          key: coverage-baseline-main-${{ github.run_id }}
+          restore-keys: |
+            coverage-baseline-main-
+
+      # Free runner disk BEFORE the tarpaulin instrumented build — a
+      # workspace --all-features llvm-cov build exhausts the default
+      # GitHub runner disk (observed: "No space left on device" #617).
+      # Best-effort cleanup of preinstalled toolchains we don't use.
+      - name: Free disk space (tarpaulin instrumented build is large)
+        continue-on-error: true
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h /
+
+      # Swap headroom BEFORE tarpaulin (#1310). Root cause of the
+      # intermittent (~25-30% of runs) red on this job: the instrumented
+      # build/test peak intermittently exceeds the 7 GB hosted-runner RAM
+      # and the VM itself is killed ~12 min in — the run log ends mid-
+      # tarpaulin with every subsequent step (including the `if: always()`
+      # report/upload steps) left with NO conclusion, so `continue-on-error`
+      # on the tarpaulin step cannot save the job (there is no step failure
+      # to tolerate; the machine is gone). Evidence: runs 28574081870 /
+      # 28533084378 / 28530504290 / 28428886171 all share the signature;
+      # green runs (e.g. 28418824370) complete the identical steps.
+      # Prevention is the only lever for VM death: 4G swap absorbs the
+      # transient peak (disk freed above; swap I/O only costs when the
+      # spike actually happens), and the tarpaulin step below halves build
+      # parallelism + caps test threads. Per ADR-224 CI-trust: an
+      # informational gate must still be green-when-good.
+      - name: Add swap headroom (tarpaulin peak RAM kills the 7 GB runner VM)
+        continue-on-error: true
+        run: |
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      # Run tarpaulin → LCOV. continue-on-error: a test failure (the
+      # authoritative test gate is ci.yml's `test` job) must not turn this
+      # informational job red; the parser handles a missing/partial lcov.
+      # --jobs 2 + --test-threads 2 (#1310): bound peak RSS of the
+      # instrumented build (parallel link of large test binaries) and of
+      # the instrumented test run on the 7 GB runner — see the swap step
+      # note above for the VM-death evidence. Cost: a few extra minutes
+      # inside the 60-min job budget.
+      - name: Run cargo-tarpaulin (workspace, LCOV)
+        id: tarpaulin
+        continue-on-error: true
+        run: |
+          mkdir -p target/coverage
+          cargo tarpaulin \
+            --workspace --all-features \
+            --engine llvm \
+            --jobs 2 \
+            --timeout 120 \
+            --out Lcov \
+            --output-dir target/coverage \
+            --exclude-files 'target/*' \
+            --exclude-files '*/tests/*' \
+            --exclude-files '*/benches/*' \
+            --exclude-files 'examples/*' \
+            --exclude-files 'fuzz/*' \
+            --exclude-files '*/build.rs' \
+            -- --test-threads 2
+
+      # Parse → per-crate table → $GITHUB_STEP_SUMMARY + coverage-report.md.
+      # --warn-only forces exit 0 (informational); the flag exit codes are the
+      # unit-tested contract for the future blocking flip (docs/coverage-gate.md).
+      - name: Per-crate coverage report (warn-mode)
+        id: report
+        if: always()
+        run: |
+          BASELINE_ARG=()
+          if [ -f coverage-baseline.json ]; then
+            BASELINE_ARG=(--baseline coverage-baseline.json)
+            echo "Using restored baseline coverage-baseline.json"
+          else
+            echo "No baseline restored — regression (>1pp) check skipped this run."
+          fi
+          python3 scripts/coverage_check.py \
+            --lcov target/coverage/lcov.info \
+            "${BASELINE_ARG[@]}" \
+            --min 80 --max-drop 1.0 \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --emit-baseline coverage-baseline.json \
+            --warn-only \
+            > coverage-report.md
+          echo "exit_report=$?"
+
+      # Informational sticky PR comment. continue-on-error so a fork PR's
+      # read-only token (no comment permission) degrades to the job summary.
+      - name: Sticky PR comment
+        if: github.event_name == 'pull_request' && always()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- arcgraph-coverage-warn-mode -->';
+            let report = '';
+            try { report = fs.readFileSync('coverage-report.md', 'utf8'); }
+            catch (e) { report = '_coverage report unavailable (tarpaulin produced no lcov this run)_'; }
+            const body = `${marker}\n${report}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      # Persist the fresh baseline from `main` so subsequent PRs can compute
+      # the >1pp regression delta. Cache keys are immutable; the run-id key +
+      # the restore-keys prefix above means each main run publishes a new
+      # baseline the next PRs pick up.
+      - name: Save coverage baseline (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && always()
+        uses: actions/cache/save@v4
+        with:
+          path: coverage-baseline.json
+          key: coverage-baseline-main-${{ github.run_id }}
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.run_id }}
+          path: |
+            target/coverage/lcov.info
+            coverage-baseline.json
+            coverage-report.md
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,1 @@
+MATCH (用户:Person {名前: "山田"}) RETURN 用户

@@ -1,0 +1,236 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ArcGraph StatefulSet — W24-OPS-α / ADR-093 §D-5.
+#
+# Production reference: single-replica StatefulSet with a stable volume
+# claim (the PVC survives pod restarts).
+#
+# Wired against:
+#   • livez / readyz (ADR-093 §D-1) — distinct probes per Kubernetes
+#     lifecycle semantics.
+#   • OTLP env vars (ADR-093 §D-2) — via the operator-overridable
+#     ConfigMap below.
+# Defaults match `arcgraph.yaml` ConfigMap in `configmap.yaml` (sister
+# file). Operator override: replace the ConfigMap, restart the pods.
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: arcgraph
+  namespace: arcgraph-prod
+  labels:
+    app: arcgraph
+    version: v1.0-alpha
+spec:
+  serviceName: arcgraph-headless
+  # ArcGraph is a single-writer database. Multiple independent pods do
+  # not form a cluster and must not be presented as replicas.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arcgraph
+  template:
+    metadata:
+      labels:
+        app: arcgraph
+        version: v1.0-alpha
+    spec:
+      # Run as non-root per the distroless `cc-debian12:nonroot` base
+      # image (Dockerfile USER directive). The `runAsUser` here matches
+      # the distroless UID (65532 for `nonroot` per
+      # https://github.com/GoogleContainerTools/distroless/blob/main/cc/BUILD#L31).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        # W24-SEC-α dovetail: drop all capabilities; seccomp default
+        # profile + RuntimeDefault.
+        seccompProfile:
+          type: RuntimeDefault
+      # Topology spread — schedule each replica on a different node
+      # (zone-aware). Production deployments may extend to
+      # topologyKey: topology.kubernetes.io/zone for multi-AZ.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: arcgraph
+      containers:
+        - name: arcgraph
+          image: arcgraph:v1.0-alpha
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/arcgraph"]
+          args:
+            - "serve"
+            - "--stdio-mcp"
+            # W28 / ADR-183 (durable-by-default): `serve` refuses to
+            # start without an explicit storage mode. This production
+            # StatefulSet passes `--data /var/lib/arcgraph/data` — a
+            # durable file-backed page store (`pages.db`) + WAL (`wal/`)
+            # rooted inside the PVC (mounted at `/var/lib/arcgraph`).
+            # `DEFAULT` runs at
+            # `DurabilityTier::Strict` → committed records survive pod
+            # restart / reschedule (the GA durability guarantee). The PVC
+            # is `ReadWriteOnce` per-replica, which is the correct access
+            # mode for a single-writer durable store.
+            - "--data"
+            - "/var/lib/arcgraph/data"
+            - "--admin-http"
+            - "0.0.0.0:8090"
+            # W24-OPS-α R1 fix-up (BLOCKER H1): K8s httpGet probes
+            # originate from the host network namespace and cannot
+            # reach a 127.0.0.1-bound listener inside the pod's
+            # network namespace. The admin HTTP server requires
+            # explicit operator opt-in (`--allow-remote-admin-bind`)
+            # before accepting non-loopback binds (W14 retro IR
+            # L1-HIGH-4 loopback-default discipline). Production K8s
+            # deployments using httpGet probes MUST set both
+            # `--admin-http 0.0.0.0:<port>` AND
+            # `--allow-remote-admin-bind`.
+            - "--allow-remote-admin-bind"
+            # M6-08+ swap to: --http 0.0.0.0:8443 + --cert /etc/tls/cert.pem
+            # + --key /etc/tls/key.pem
+          ports:
+            - name: admin-http
+              containerPort: 8090
+              protocol: TCP
+            - name: mcp-http
+              containerPort: 8080
+              protocol: TCP
+            # W24-OPS-α R1 fix-up (MED M3): the `metrics` port (9090)
+            # is removed from the v1.0-α StatefulSet because the
+            # `--stdio-mcp` transport this manifest deploys does NOT
+            # wire a `/metrics` listener (per the inline note at
+            # `crates/arcgraph-cli/src/bin/arcgraph.rs::run_serve_stdio`:
+            # "the CLI doesn't yet wire Prometheus /metrics exposure
+            # on the stdio path (no listener)"). The metrics endpoint
+            # is mounted only on the MCP HTTP transport (port 8080,
+            # forward-pinned to M6-08+). Re-add the metrics port at
+            # M6-08+ when `--http` cert/key wiring + `--metrics-http`
+            # CLI flag land.
+            - name: bolt
+              containerPort: 7687
+              protocol: TCP
+          # Per ADR-093 §D-1: distinct liveness + readiness probes.
+          # livenessProbe failure → kubelet restarts the pod.
+          # readinessProbe failure → kubelet removes the pod from
+          #   Service endpoints (still alive; not serving traffic).
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: admin-http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin-http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          # Startup probe: gives WAL replay / index loading up to 5min
+          # before the kubelet starts livenessProbe enforcement.
+          # W28 / ADR-183: this StatefulSet now boots the DURABLE
+          # substrate (`--data` above), so cold start pays WAL recovery
+          # (`O(WAL size)` — one sequential replay scan) + the M4-41
+          # cold-start `CatalogStats` rebuild. The 5-min startup-probe
+          # window (failureThreshold 150 × periodSeconds 2) absorbs the
+          # multi-second-to-minutes replay cost for a large WAL chain;
+          # WAL checkpoint/compaction to bound recovery is forward-pinned
+          # (ADR-183 §Consequences "Recovery cost").
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: admin-http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 150  # 5min total
+          envFrom:
+            - configMapRef:
+                name: arcgraph-config
+          # Resource requests / limits — v1.0-α conservative defaults.
+          # Operators tune to their workload profile per
+          # `docs/perf/v1-alpha-baseline.md` (forward-pinned).
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/arcgraph
+            # M6-08+ TLS cert mount:
+            # - name: tls-certs
+            #   mountPath: /etc/tls
+            #   readOnly: true
+          # SecurityContext at container level — defense-in-depth.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+      # W24-OPS-α R1 fix-up (MED M2): graceful drain.
+      #
+      # When the kubelet decides to terminate the pod, it:
+      #   1. Removes the pod from Service endpoints (asynchronously via
+      #      kube-proxy iptables reconcile — typically <2s but not
+      #      guaranteed).
+      #   2. Sends SIGTERM.
+      #   3. Waits `terminationGracePeriodSeconds`.
+      #   4. SIGKILL.
+      #
+      # The race condition: kube-proxy iptables reconcile is async, so
+      # in-flight connections may still arrive AFTER SIGTERM has been
+      # sent. The arcgraph CLI's `--drain-grace-seconds` flag (default
+      # 15s) handles this: on SIGTERM the readiness gate flips to
+      # `Draining`, /readyz starts returning 503, and the binary sleeps
+      # for the drain grace window so kube-proxy can reconcile BEFORE
+      # the transport begins teardown.
+      #
+      # `terminationGracePeriodSeconds` MUST be ≥ `--drain-grace-seconds`
+      # + transport-teardown budget (~10s for stdio MCP flush + admin
+      # HTTP shutdown). Default below: 45s = 15s drain + 30s teardown.
+      terminationGracePeriodSeconds: 45
+      # M6-08+ TLS Secret volume — uncommented when --http is wired.
+      # volumes:
+      #   - name: tls-certs
+      #     secret:
+      #       secretName: arcgraph-tls
+      #       defaultMode: 0400
+
+  # Stable volume claim mounted at `/var/lib/arcgraph`. It holds the
+  # durable store (`pages.db` + `wal/`) so committed records survive a
+  # pod restart. ReadWriteOnce is the correct access mode for this
+  # single-writer database.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: arcgraph
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        # storageClassName: <operator-configured>  # uncomment to pin
+
+  # Ordered start/stop preserves StatefulSet lifecycle semantics.
+  podManagementPolicy: OrderedReady
+  # 0 → drain in-flight admin operations; the StatefulSet controller
+  # waits for `terminationGracePeriodSeconds` before SIGKILL.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0

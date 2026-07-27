@@ -1,0 +1,642 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Release workflow — W15β M6-03.
+#
+# Triggers:
+#   • push: tags matching `v*.*.*` (e.g., v0.1.0-alpha.1, v1.2.0 — the
+#     first GA tag is the literal `v1.2.0` per ADR-181; no `v1.0.0` is cut)
+#   • workflow_dispatch (manual, for dry-runs)
+#
+# Jobs (6 — verified against the job: keys below):
+#   1. build-binaries  — cross-platform matrix; packages + cosign-signs +
+#                        uploads release assets.
+#   2. docker-push     — builds the Dockerfile + pushes to ghcr.io; cosign-
+#                        signs the pushed image by immutable digest.
+#   3. sbom            — CycloneDX SBOM (cargo-cyclonedx) + cosign sign
+#                        (W19β #323).
+#   4. slsa-subjects   — aggregates per-matrix-row subject hashes into one
+#                        provenance subject list (W19β #324).
+#   5. slsa-provenance — SLSA Build L3 in-toto attestation via the
+#                        slsa-github-generator reusable workflow (W19β #324).
+#   6. crates-publish  — HELD: gated `if: false`, never runs (see JOB 6).
+#                        crates.io publish is held pending durable storage +
+#                        an explicit Director go (ADR-181; first GA = 1.2.0).
+#
+# Dormant until a `v*.*.*` tag is pushed. workflow_dispatch defaults to
+# `dry_run: true`, which exercises every BUILD / TEST / PACKAGE step while
+# skipping every PUBLISH step (GitHub Release upload + GHCR image push).
+# Set `dry_run: false` on a manual run to perform a real release from an
+# arbitrary ref — rare; tag pushes are the canonical release path. The
+# default-true posture makes accidental dispatches non-destructive (closes
+# #312).
+#
+# Secrets required:
+#   • GITHUB_TOKEN — auto-injected by Actions; carries `packages:write`
+#     scope for ghcr.io pushes (granted via the job-level `permissions`
+#     block below).
+#   • No external secrets — crates.io publish is HELD (job `crates-publish`
+#     stays `if: false`) until file-backed durable storage lands AND the
+#     Technical Director gives an explicit go (ADR-181; first GA = 1.2.0).
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run mode: build + test + package, but skip publishing (GitHub Release upload + GHCR image push). Default true so accidental dispatches are non-destructive; set to false to perform a real release from a manual run.'
+        type: boolean
+        default: true
+
+# Default permissions (least-privilege per CIS Actions Benchmark §2.1);
+# specific jobs widen these as needed.
+permissions:
+  contents: read
+
+# Cancel in-flight runs for the same tag — useful for amended tags.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────
+  # JOB 1: build-binaries
+  # ────────────────────────────────────────────────────────────────────
+  # Cross-platform release artifacts. Runs on tag pushes AND on
+  # workflow_dispatch (so dry-runs exercise the full build + package
+  # path); the upload-to-release step itself is dry-run-gated below.
+  build-binaries:
+    name: Build (${{ matrix.target }})
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write   # for uploading GH Release assets
+      id-token: write   # W19β #322 — sigstore OIDC keyless cosign signing
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_suffix: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            artifact_suffix: linux-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact_suffix: macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            artifact_suffix: macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin arcgraph
+
+      - name: Package artifact
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN_NAME="arcgraph"
+          TAG="${GITHUB_REF_NAME}"
+          ARTIFACT="arcgraph-${TAG}-${{ matrix.artifact_suffix }}.tar.gz"
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${BIN_NAME}"
+          cp LICENSE dist/
+          cp README.md dist/
+          tar -C dist -czf "${ARTIFACT}" "${BIN_NAME}" LICENSE README.md
+          # sha256sum is GNU coreutils on Linux; macOS uses `shasum -a 256`.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          else
+            shasum -a 256 "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          fi
+          echo "artifact_path=${ARTIFACT}" >> "${GITHUB_OUTPUT}"
+          echo "artifact_sha256_path=${ARTIFACT}.sha256" >> "${GITHUB_OUTPUT}"
+
+      # W19β #324 — Emit per-matrix-row SHA-256 hash for SLSA provenance
+      # subject collection. The slsa-github-generator reusable workflow
+      # consumes a base64-encoded `sha256sum` output covering EVERY
+      # release subject (tarball + sha256 sidecar across all matrix
+      # rows). Because matrix → job outputs collapses to the LAST row,
+      # we upload each row's hash file as an actions/upload-artifact
+      # entry; the `slsa-subjects` job downloads them all and concats.
+      - name: Emit SLSA subject digest
+        id: slsa-hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          ART="${{ steps.package.outputs.artifact_path }}"
+          SHA="${{ steps.package.outputs.artifact_sha256_path }}"
+          # sha256sum output format: "<digest>  <path>" — exactly what
+          # slsa-github-generator's `base64-subjects` decodes.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ART}" "${SHA}" > "slsa-subjects-${{ matrix.artifact_suffix }}.txt"
+          else
+            shasum -a 256 "${ART}" "${SHA}" > "slsa-subjects-${{ matrix.artifact_suffix }}.txt"
+          fi
+          cat "slsa-subjects-${{ matrix.artifact_suffix }}.txt"
+
+      - name: Upload SLSA subject digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: slsa-subjects-${{ matrix.artifact_suffix }}
+          path: slsa-subjects-${{ matrix.artifact_suffix }}.txt
+          retention-days: 7
+
+      # W19β #322 — Install cosign for sigstore keyless OIDC signing.
+      # Pinned to a specific minor; cosign-installer auto-fetches the
+      # matching cosign binary into PATH.
+      #
+      # Gating: cosign signing is dry-run-aware. On `workflow_dispatch`
+      # dry-runs we deliberately SKIP signing — uploading transient
+      # signatures to public Rekor for one-off dispatches would
+      # pollute the transparency log with bundles no consumer can
+      # bind to a meaningful artifact. Only real tag pushes (or an
+      # explicit `dry_run: false` dispatch) produce signed bundles.
+      - name: Install cosign
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        uses: sigstore/cosign-installer@v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+
+      # W19β #322 — Keyless OIDC sign-blob produces a single .bundle
+      # file (cosign protobuf wire format) that contains both the
+      # detached signature and the Fulcio short-lived x509 certificate
+      # chain. The bundle is the canonical artifact for `cosign
+      # verify-blob --bundle <...>`; the cert + sig binding to the
+      # GitHub Actions OIDC identity (`certificate-identity-regexp` /
+      # `certificate-oidc-issuer`) is what makes the chain auditable
+      # without a long-lived signing key. See
+      # docs/security/cosign-verify.md for the consumer-side
+      # verification recipe.
+      #
+      # Rekor transparency-log entry is uploaded automatically by
+      # cosign (default behavior — disable only with --tlog-upload=false,
+      # which we deliberately do NOT set: public Rekor inclusion is the
+      # supply-chain auditability guarantee per
+      # https://docs.sigstore.dev/cosign/verifying/verify/#verify-an-artifact-and-its-signature).
+      - name: Sign artifact + sha256 (cosign keyless)
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        id: cosign-sign
+        shell: bash
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          ART="${{ steps.package.outputs.artifact_path }}"
+          SHA="${{ steps.package.outputs.artifact_sha256_path }}"
+          cosign sign-blob --yes --bundle "${ART}.cosign.bundle" "${ART}"
+          cosign sign-blob --yes --bundle "${SHA}.cosign.bundle" "${SHA}"
+          echo "artifact_bundle=${ART}.cosign.bundle" >> "${GITHUB_OUTPUT}"
+          echo "sha256_bundle=${SHA}.cosign.bundle"   >> "${GITHUB_OUTPUT}"
+
+      # Publish gate (#312): on workflow_dispatch dry-runs, the artifact
+      # is built + packaged above but NOT uploaded to a GitHub Release.
+      # W19β #322 — cosign .bundle files for both the tarball and its
+      # sha256 sidecar are uploaded alongside so verifiers can run
+      # `cosign verify-blob --bundle <art>.cosign.bundle <art>` against
+      # the published artifacts without round-trip to Rekor (the bundle
+      # is self-contained).
+      - name: Upload to GitHub Release
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package.outputs.artifact_path }}
+            ${{ steps.package.outputs.artifact_sha256_path }}
+            ${{ steps.cosign-sign.outputs.artifact_bundle }}
+            ${{ steps.cosign-sign.outputs.sha256_bundle }}
+          draft: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ────────────────────────────────────────────────────────────────────
+  # JOB 2: docker-push
+  # ────────────────────────────────────────────────────────────────────
+  # Multi-arch container build + push to ghcr.io.
+  #
+  # Gated (#312):
+  #   • tag-triggered runs: always builds + pushes.
+  #   • workflow_dispatch runs: always builds; only pushes when
+  #     `dry_run: false` is set. The default dispatch input is
+  #     `dry_run: true` → build only, no push — so an operator can
+  #     validate the Dockerfile + buildx pipeline end-to-end without
+  #     polluting ghcr.io.
+  docker-push:
+    name: Docker build + push
+    needs: build-binaries
+    if: |
+      always() &&
+      (needs.build-binaries.result == 'success' || needs.build-binaries.result == 'skipped') &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # for ghcr.io push
+      id-token: write   # W19β #322 — sigstore OIDC keyless image signing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Publish gate (#312): no GHCR credentials are obtained on a
+      # dry-run dispatch — the build step below runs with `push: false`.
+      - name: Log in to GHCR
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/arcgraph
+          # The dry-run rule (last) ensures workflow_dispatch builds
+          # always have a tag to operate on, since the semver rules
+          # don't match non-tag dispatches. Image is built with this
+          # tag locally but never pushed (push: false on dry-run).
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=dry-run-${{ github.sha }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      # Publish gate (#312): the build runs unconditionally; only the
+      # push to ghcr.io is gated on the dry_run input. Buildx still
+      # writes layers to the GHA cache during dry-run, which warms the
+      # subsequent real release.
+      #
+      # W19β #322: `id: build-push` exposes the multi-arch manifest's
+      # immutable `digest` output (sha256:...) — that digest is the
+      # canonical subject for `cosign sign` (signing-by-tag is unsafe
+      # because tags are mutable; cosign's docs §"Sign an image" insist
+      # on digest pinning, see
+      # https://docs.sigstore.dev/cosign/signing/signing_with_blobs/).
+      - name: Build (and conditionally push) image
+        id: build-push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # W19β #322 — install cosign for image signing.
+      - name: Install cosign
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        uses: sigstore/cosign-installer@v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+
+      # W19β #322 — Keyless OIDC sign each pushed tag by its immutable
+      # digest. The matrix of tags from `docker/metadata-action` resolves
+      # to the same multi-arch manifest digest, so we iterate over the
+      # tag list and emit one signature per tag (canonical cosign idiom
+      # per https://docs.sigstore.dev/cosign/signing/signing_with_containers/).
+      # The Fulcio cert binds the signature to this workflow's identity:
+      #   https://github.com/aleflabs/arcgraph/.github/workflows/release.yml@<ref>
+      # which is what `cosign verify` matches against in
+      # docs/security/cosign-verify.md.
+      - name: Sign Docker image (cosign keyless)
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        shell: bash
+        env:
+          COSIGN_YES: "true"
+          DIGEST: ${{ steps.build-push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::build-push step produced no digest — refusing to sign by-tag"
+            exit 1
+          fi
+          # `${TAGS}` is a newline-separated list of fully-qualified
+          # `ghcr.io/.../arcgraph:<tag>` refs.
+          while IFS= read -r tag; do
+            [ -z "${tag}" ] && continue
+            # Strip any existing ":tag" and append @sha256:... so cosign
+            # signs the immutable digest, not the mutable tag.
+            base="${tag%:*}"
+            ref="${base}@${DIGEST}"
+            echo "::group::cosign sign ${ref}"
+            cosign sign --yes "${ref}"
+            echo "::endgroup::"
+          done <<< "${TAGS}"
+
+  # ────────────────────────────────────────────────────────────────────
+  # JOB 3: sbom — CycloneDX SBOM generation (W19β #323)
+  # ────────────────────────────────────────────────────────────────────
+  # Per ADR-046 (draft) §"Open questions" forward-pin and the W19β
+  # spawn prompt: generate a CycloneDX SBOM via cargo-cyclonedx, sign
+  # it with cosign (so verifiers can chain trust SBOM ↔ binary via the
+  # same Fulcio identity), and attach to the release.
+  #
+  # Why CycloneDX and not SPDX:
+  #   • cargo-cyclonedx is a first-party CycloneDX SIG tool with native
+  #     Cargo metadata support (`cargo metadata` → component graph).
+  #     SPDX-equivalent (`anchore/sbom-action` / `syft`) requires the
+  #     compiled binary + scanner pass and emits a coarser graph.
+  #   • CycloneDX is the upstream Sigstore-recommended format for
+  #     Rust workspaces (per cyclonedx.org/use-cases/#rust + the
+  #     `cargo-cyclonedx` README §"Why CycloneDX").
+  #   • SPDX emission is forward-pinned for v0.3.0 (sister-anchored on
+  #     the same `cargo metadata` graph) if the v0.2.0 SBOM consumer
+  #     story (docs/security/sbom.md §Consumers) demands SPDX-only
+  #     ingest.
+  #
+  # The SBOM is workspace-scoped (one file per release tag, not one
+  # per matrix row) because the dep graph is identical across targets
+  # — the host triple only varies in `target-specific` deps which
+  # cargo-cyclonedx emits via the `--target` flag (recorded in the
+  # bom's component scope; downstream verifiers can filter by target
+  # if needed).
+  sbom:
+    name: SBOM (CycloneDX) + cosign sign
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # upload to release
+      id-token: write   # sigstore OIDC for cosign sign-blob
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sbom
+
+      # cargo-cyclonedx is an Apache-2.0-licensed CycloneDX SIG project
+      # (https://github.com/CycloneDX/cargo-cyclonedx). The pinned version
+      # tracks the most recent release with a stable JSON schema 1.5
+      # emitter (per CycloneDX spec
+      # https://cyclonedx.org/docs/1.5/json/). Bumps to this pin should
+      # be paired with a docs/security/sbom.md schema-version note.
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version 0.5.7 --locked
+
+      - name: Generate CycloneDX SBOM
+        id: sbom
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # `--all` walks the workspace; `--format json` selects
+          # CycloneDX JSON 1.5; `--target all` records target-specific
+          # deps across every published triple (so downstream verifiers
+          # don't need to re-run with `--target`). cargo-cyclonedx ≥0.5
+          # writes `<package>.cdx.json` next to each crate's Cargo.toml.
+          cargo cyclonedx --all --format json --target all
+
+          # Aggregate per-crate BOMs into ONE workspace BOM. The
+          # consolidation script lives in scripts/sbom-aggregate.py
+          # (created by this same W19β commit so the SBOM job is
+          # exercisable locally with `scripts/sbom-aggregate.py`).
+          SBOM_NAME="arcgraph-${TAG}.cdx.json"
+          python3 scripts/sbom-aggregate.py \
+              --version "${TAG}" \
+              --output "${SBOM_NAME}"
+
+          # Co-locate per-crate BOMs in a tarball for archival
+          # completeness (consumer can request fine-grained per-crate
+          # provenance).
+          mkdir -p sbom-out
+          find . -name '*.cdx.json' -not -path './target/*' -not -path './.git/*' \
+              -not -name "${SBOM_NAME}" \
+              -exec cp --parents {} sbom-out/ \; || true
+          tar -czf "arcgraph-${TAG}-sbom-per-crate.tar.gz" sbom-out/
+
+          # sha256 sidecar for the canonical workspace SBOM.
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${SBOM_NAME}" > "${SBOM_NAME}.sha256"
+          else
+            shasum -a 256 "${SBOM_NAME}" > "${SBOM_NAME}.sha256"
+          fi
+          echo "sbom_path=${SBOM_NAME}"              >> "${GITHUB_OUTPUT}"
+          echo "sbom_sha_path=${SBOM_NAME}.sha256"   >> "${GITHUB_OUTPUT}"
+          echo "sbom_tarball=arcgraph-${TAG}-sbom-per-crate.tar.gz" >> "${GITHUB_OUTPUT}"
+
+      # W19β #322 + #323 — sign the SBOM with cosign so verifiers can
+      # chain the SBOM's authenticity to the same Fulcio identity that
+      # signed the binary. See docs/security/sbom.md §Verification.
+      # Skipped on dry-runs (same Rekor-pollution reasoning as the
+      # binary-signing gate in build-binaries).
+      - name: Install cosign
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        uses: sigstore/cosign-installer@v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Sign SBOM (cosign keyless)
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        id: cosign-sbom
+        shell: bash
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          SBOM="${{ steps.sbom.outputs.sbom_path }}"
+          cosign sign-blob --yes --bundle "${SBOM}.cosign.bundle" "${SBOM}"
+          echo "sbom_bundle=${SBOM}.cosign.bundle" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload SBOM to GitHub Release
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.sbom.outputs.sbom_path }}
+            ${{ steps.sbom.outputs.sbom_sha_path }}
+            ${{ steps.cosign-sbom.outputs.sbom_bundle }}
+          draft: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ────────────────────────────────────────────────────────────────────
+  # JOB 4: slsa-subjects — aggregate per-matrix-row subject hashes
+  # ────────────────────────────────────────────────────────────────────
+  # W19β #324. The slsa-github-generator reusable workflow consumes
+  # one `base64-subjects` string covering EVERY artifact in the
+  # release. Matrix → job outputs collapses to the LAST row, so we
+  # round-trip the hashes through actions/upload-artifact + the
+  # collector below.
+  #
+  # The collector emits one base64-encoded `sha256sum` payload that
+  # lists every release tarball + sha256 sidecar across the four
+  # matrix rows. That single payload becomes the SLSA L3 provenance
+  # subject list.
+  slsa-subjects:
+    name: SLSA subject collector
+    needs: build-binaries
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.combine.outputs.hashes }}
+    steps:
+      - name: Download all SLSA subject digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: slsa-subjects-*
+          merge-multiple: true
+
+      - name: Combine subject digests
+        id: combine
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Concatenate every per-row subject file into one canonical
+          # subjects list. The slsa-github-generator README §"Generation
+          # of provenance" specifies `base64(sha256sum_output)` so we
+          # base64-encode without line wraps (-w0).
+          cat slsa-subjects-*.txt > all-subjects.txt
+          echo "Combined SLSA subjects:"
+          cat all-subjects.txt
+          HASHES=$(base64 -w0 < all-subjects.txt)
+          echo "hashes=${HASHES}" >> "${GITHUB_OUTPUT}"
+
+  # ────────────────────────────────────────────────────────────────────
+  # JOB 5: slsa-provenance — SLSA Build Level 3 attestation (W19β #324)
+  # ────────────────────────────────────────────────────────────────────
+  # Invokes the slsa-framework/slsa-github-generator reusable workflow,
+  # which generates an in-toto v1.0 provenance statement covering every
+  # subject in `base64-subjects` and signs it with the Fulcio short-
+  # lived cert (sigstore keyless OIDC). The provenance file is
+  # `<release-name>.intoto.jsonl` and is uploaded to the GitHub Release
+  # via `upload-assets: true`.
+  #
+  # SLSA L3 vs L2 vs L1:
+  #   • L1 — provenance exists.
+  #   • L2 — provenance is authenticated + non-falsifiable.
+  #   • L3 — provenance is generated on a hosted, isolated builder
+  #     (the SLSA reusable workflow runs as a separate VM the calling
+  #     workflow cannot modify).
+  #
+  # Why use the reusable workflow:
+  #   The generator runs as a separate isolated job whose internal
+  #   steps the caller cannot intercept — this is the L3 isolation
+  #   guarantee that a hand-rolled `slsa-verifier`-compatible
+  #   provenance emitter CANNOT provide.
+  #
+  # See docs/security/slsa-attestation.md for the verification recipe.
+  #
+  # NOTE: reusable workflow MUST be invoked at job level (cannot be a
+  # step). The `permissions` block here is the minimum the generator
+  # needs:
+  #   • `actions: read` — to introspect the calling workflow run
+  #   • `id-token: write` — sigstore OIDC for the Fulcio cert
+  #   • `contents: write` — to attach the provenance file to the Release
+  slsa-provenance:
+    name: SLSA L3 provenance (slsa-github-generator)
+    needs: slsa-subjects
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    # v2.0.0 is the canonical pin per slsa-framework's stability table
+    # (https://github.com/slsa-framework/slsa-github-generator#stability);
+    # the reusable-workflow author signs its own releases so this ref
+    # is itself cosign-verifiable.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.slsa-subjects.outputs.hashes }}"
+      # Attach the resulting <name>.intoto.jsonl provenance file to
+      # the existing draft release for this tag (the same draft that
+      # build-binaries / sbom / docker-push uploaded into).
+      upload-assets: true
+      # `provenance-name` is the basename of the emitted
+      # *.intoto.jsonl artifact uploaded to the release.
+      provenance-name: arcgraph-${{ github.ref_name }}.intoto.jsonl
+
+  # ────────────────────────────────────────────────────────────────────
+  # JOB 6: crates-publish  (HELD — gated `if: false`, never runs)
+  # ────────────────────────────────────────────────────────────────────
+  # crates.io publish is HELD until (a) file-backed durable storage lands
+  # AND (b) the Technical Director gives an explicit go (ADR-181: straight-
+  # to-1.2; the first GA tag is the literal `1.2.0`, held pending durable
+  # storage). Enabling this job IS the GA publish/tag-cut step — a single
+  # one-way, outward-facing surface — and is deliberately NOT enabled by
+  # this version-wiring reconciliation. The stub is retained as a forward-
+  # anchor so the workflow shape is reviewable end-to-end; gated off via
+  # `if: false` so it never runs. (Originally "DEFERRED to W16α" per the
+  # W15β spawn prompt; re-anchored to the ADR-181 durable-storage +
+  # Director-go gate — there is no `1.0.0`/W16α first release.)
+  crates-publish:
+    name: Publish to crates.io (HELD — gated off)
+    # HELD. Do NOT flip to a live condition without BOTH (a) file-backed
+    # durable storage landed AND (b) an explicit Technical Director go
+    # (ADR-181). Enabling this is the GA publish/tag-cut step — out of scope
+    # for version-wiring reconciliation. Leave `if: false`.
+    if: false
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # When enabled (post-hold), publish each workspace crate to crates.io
+      # in topological dependency order, so every crate's dependencies are
+      # already on crates.io when it publishes. Order verified against the
+      # crate layout in bounded-context policy (each crate depends only on those to
+      # its left):
+      #
+      #   arcgraph-core → arcgraph-storage → arcgraph-index →
+      #   arcgraph-query → arcgraph-mcp → arcgraph-cli
+      #
+      # The real wiring (a future, Director-signed-off PR) will run, per
+      # crate in that order:
+      #     cargo publish -p <crate> --locked
+      # with an inter-crate wait for the crates.io index to settle between
+      # publishes. Intentionally NOT wired here: no live `cargo publish`
+      # executes while the job is held.
+      - name: Held — not enabled
+        run: |
+          echo "crates-publish is HELD (ADR-181): gated 'if: false'."
+          echo "Enable only after file-backed durable storage + an explicit Director go."
+          echo "Publish order when enabled: core -> storage -> index -> query -> mcp -> cli."
+          # Fail-stop guard: if this job is ever reached (i.e. the gate was
+          # flipped without wiring the real publish steps above), fail loudly
+          # rather than silently no-op — never half-publish a release.
+          exit 1

@@ -1,0 +1,34 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# ── Phase 5.5 review (PR #128 review fold-in 2026-04-26) ──
+#
+# This file is reserved for canonical ChaCha20 seed bytes from a
+# real failing proptest run. NONE CURRENTLY CAPTURED.
+#
+# History: the prior Phase 5 review claimed `seed=76603` failed
+# `f3_filtered_alpha_prune_preserves_label_connectivity` at commit
+# 499d167. On independent re-derivation at PROPTEST_CASES=10000 the
+# bug does not reproduce; the F.3 source
+# (`crates/arcgraph-vector/src/diskann/filtered.rs`) is byte-
+# identical between 499d167 and current main, so no production-
+# code fix was required. The prior failure was likely a build-cache
+# artifact, not a real algorithmic bug.
+#
+# An earlier revision of this file committed a placeholder `cc ...`
+# line tagged "seed=76603"; the bytes did not actually encode 76603
+# (`0x012b` ≠ `0x12b3b`) and the comment was misleading. The placeholder
+# was removed per the second-pass review.
+#
+# If a future change to FilteredRobustPrune introduces a connectivity
+# violation, drop the canonical ChaCha state here as a `cc <64-hex>`
+# line so future runs replay it deterministically. The cross-cutting
+# deterministic pin lives at
+# `crates/arcgraph-vector/tests/iv_invariants.rs::
+# iv4_recall_floor_diskann_filtered_mixed_labels` and exercises the
+# minority-label regime (50/15/15 at N=80, with the two minority
+# buckets sitting below R=16) regardless of proptest RNG state.

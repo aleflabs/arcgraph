@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a256505ee3170cd3778670d91db4d7f55981e1a7909a60521ee7976749fe13e7 # shrinks to state = FaultState { total_nodes: None, total_rels: None, label_cards: [Some(0), None, None, None], rel_type_cards: [None, None, None], commits_observed: 0 }

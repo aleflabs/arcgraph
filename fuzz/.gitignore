@@ -1,0 +1,13 @@
+target
+artifacts
+coverage
+
+# W22-DB-ε: seed corpora are committed (load-bearing per ADR-079
+# Pillar 1). Per-target subdirectories under `corpus/` carry hand-
+# crafted named seeds (e.g., `01_simple_match.txt`,
+# `03_canonical_v0.bin`) AND runtime-generated mutation files
+# (libFuzzer appends SHA1-named coverage discoveries during runs).
+# We track ONLY the hand-crafted seeds. The pattern below ignores
+# the 40-char-hex SHA1 filenames libFuzzer emits and tracks
+# everything else.
+corpus/*/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]

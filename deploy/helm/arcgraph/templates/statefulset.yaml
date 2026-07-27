@@ -1,0 +1,177 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "arcgraph.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arcgraph.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "arcgraph.fullname" . }}-headless
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "arcgraph.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "arcgraph.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Force pod restart on ConfigMap change so env-var overrides
+        # take effect without manual rolling restart.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "arcgraph.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: arcgraph
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command: ["/usr/local/bin/arcgraph"]
+          args:
+            - "serve"
+            # W28 / ADR-183 (durable-by-default): `serve` refuses to
+            # start without an explicit storage mode. When persistence
+            # is enabled (the default) pass `--data <dataDir>` for a
+            # durable file-backed page store + WAL rooted inside the
+            # per-replica PVC (mounted at /var/lib/arcgraph); `DEFAULT`
+            # runs at DurabilityTier::Strict so committed records survive
+            # pod restart. When persistence is DISABLED the store is
+            # backed by an ephemeral emptyDir (see volumes below), so the
+            # chart passes `--in-memory` — an honest non-durable posture
+            # rather than a durable claim over volatile storage.
+            {{- if .Values.statefulSet.persistence.enabled }}
+            - "--data"
+            - "{{ .Values.statefulSet.persistence.dataDir }}"
+            {{- else }}
+            - "--in-memory"
+            {{- end }}
+            {{- if eq .Values.mcp.transport "stdio" }}
+            - "--stdio-mcp"
+            {{- else }}
+            - "--http"
+            - "0.0.0.0:{{ .Values.mcp.http.port }}"
+            {{- if .Values.tls.enabled }}
+            - "--cert"
+            - "{{ .Values.mcp.http.certPath }}"
+            - "--key"
+            - "{{ .Values.mcp.http.keyPath }}"
+            {{- end }}
+            {{- end }}
+            - "--admin-http"
+            - "{{ .Values.admin.bind }}"
+            {{- if .Values.admin.allowRemoteBind }}
+            - "--allow-remote-admin-bind"
+            {{- end }}
+          ports:
+            {{- if ne .Values.mcp.transport "stdio" }}
+            - name: mcp
+              containerPort: {{ .Values.mcp.http.port }}
+              protocol: TCP
+            {{- end }}
+            - name: admin
+              containerPort: {{ include "arcgraph.adminPort" . }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: admin
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: admin
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: admin
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "arcgraph.fullname" . }}-config
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/arcgraph
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: /etc/arcgraph/tls
+              readOnly: true
+            {{- end }}
+            # tmpfs for /tmp because readOnlyRootFilesystem=true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- if not .Values.statefulSet.persistence.enabled }}
+        # Persistence disabled → back the `data` mount with an ephemeral
+        # emptyDir so the (unconditional) volumeMount resolves. The chart
+        # passes `--in-memory` in this mode (see args above), so nothing
+        # durable is written here; the mount just satisfies
+        # readOnlyRootFilesystem=true. When persistence is enabled the
+        # `data` volume is provided by the volumeClaimTemplate below.
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+        {{- end }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+  {{- if .Values.statefulSet.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "arcgraph.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.statefulSet.persistence.accessModes | nindent 10 }}
+        {{- if .Values.statefulSet.persistence.storageClassName }}
+        storageClassName: {{ .Values.statefulSet.persistence.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.statefulSet.persistence.size }}
+  {{- end }}

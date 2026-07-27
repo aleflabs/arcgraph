@@ -1,0 +1,1 @@
+MATCH (n:User), (m:Admin) DELETE n, m

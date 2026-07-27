@@ -1,0 +1,194 @@
+{
+  "_comment": "W25-OPS-PROD / ADR-093-amendment-01 §D-1 — Buffer pool hit rate + eviction rate. Metric source = arcgraph_bufpool_* from the storage crate. Sustained miss rate > 5% indicates the buffer pool is sized below the working set (page-store thrashing).",
+  "annotations": {"list": [{"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard"}]},
+  "description": "Buffer pool hit rate + eviction rate + dirty-page pressure. ADR-093-amendment-01 §D-1 dashboard 3 of 5.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Buffer pool hit rate = hits / (hits + misses). Production-target: > 95%. Sustained sub-95% means the pool is sized below the working set.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.9}, {"color": "green", "value": 0.95}]},
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(arcgraph_bufpool_hits_total[5m])) / (sum(rate(arcgraph_bufpool_hits_total[5m])) + sum(rate(arcgraph_bufpool_misses_total[5m])))",
+          "legendFormat": "hit rate",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Buffer pool hit rate (process-wide)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Page evictions per second. Sustained > 1000/s indicates the buffer pool is thrashing.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 500}, {"color": "red", "value": 1000}]},
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(arcgraph_bufpool_evictions_total[5m]))",
+          "legendFormat": "evictions/s",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Eviction rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Hits + misses over time. The ratio is the hit rate. Hits dominating means warm cache; misses spiking indicates a cold-start or working-set shift.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 2, "spanNulls": false, "stacking": {"mode": "normal"}},
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "id": 3,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(arcgraph_bufpool_hits_total[5m]))",
+          "legendFormat": "hits",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(arcgraph_bufpool_misses_total[5m]))",
+          "legendFormat": "misses",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Buffer pool hits vs misses",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Dirty page count — pages modified in memory but not yet flushed. Sustained growth indicates the flusher is falling behind the writer.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "spanNulls": false},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "id": 4,
+      "options": {
+        "legend": {"calcs": ["mean", "max", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "arcgraph_bufpool_dirty_pages",
+          "legendFormat": "dirty pages",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Dirty page count",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Pinned page count — pages locked in memory by an in-flight reader. Sustained growth indicates a slow reader leaking pins.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "spanNulls": false},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
+      "id": 5,
+      "options": {
+        "legend": {"calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "arcgraph_bufpool_pinned_pages",
+          "legendFormat": "pinned pages",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Pinned page count (in-flight read pressure)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["arcgraph", "v1.0-ga", "buffer-pool", "storage"],
+  "templating": {"list": []},
+  "time": {"from": "now-3h", "to": "now"},
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "ArcGraph — Buffer pool",
+  "uid": "arcgraph-bufpool",
+  "version": 1,
+  "weekStart": ""
+}

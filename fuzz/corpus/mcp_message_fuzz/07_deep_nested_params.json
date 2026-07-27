@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"graph.ingest","params":{"records":[{"a":{"b":{"c":{"d":[1,2,3]}}}}]},"id":7}

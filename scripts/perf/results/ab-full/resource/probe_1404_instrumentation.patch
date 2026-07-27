@@ -1,0 +1,108 @@
+diff --git a/crates/arcgraph-cli/src/bin/arcgraph_mcp_stdio.rs b/crates/arcgraph-cli/src/bin/arcgraph_mcp_stdio.rs
+index b01c22fe..a08f39ad 100644
+--- a/crates/arcgraph-cli/src/bin/arcgraph_mcp_stdio.rs
++++ b/crates/arcgraph-cli/src/bin/arcgraph_mcp_stdio.rs
+@@ -463,6 +463,18 @@ async fn run(args: CliArgs) -> Result<ServeStats> {
+         arcgraph_storage::config::WalCheckpointConfig::default(),
+     );
+ 
++    // #1404 root-cause probe (env-gated, inert unless ARCGRAPH_1404_PROBE=<secs>):
++    // logs the WAL command-channel depth + byte watermarks periodically so a
++    // sustained ingest reveals whether the unbounded crossbeam channel backs up
++    // (STEP-0 hypothesis) or stays small (Strict/T1 self-throttle → resident
++    // stores are the term). Temporary instrumentation — remove after the report.
++    if let Ok(secs) = std::env::var("ARCGRAPH_1404_PROBE") {
++        if let (Ok(secs), Some(cp)) = (secs.parse::<u64>(), durability.checkpointer()) {
++            cp.spawn_1404_probe(secs.max(1));
++            tracing::info!(target: "probe_1404", secs, "PROBE-1404 armed");
++        }
++    }
++
+     // `SchemaProvider`: overlay for `--demo-fixture aml_demo`,
+     // production `StorageSchemaProvider` otherwise. The other five
+     // dispatcher slots use the W17α production adapters unconditionally
+diff --git a/crates/arcgraph-cli/src/bootstrap.rs b/crates/arcgraph-cli/src/bootstrap.rs
+index b924167c..3d3ce580 100644
+--- a/crates/arcgraph-cli/src/bootstrap.rs
++++ b/crates/arcgraph-cli/src/bootstrap.rs
+@@ -697,6 +697,54 @@ impl DurableCheckpointer {
+         self.wal_handle.wal_bytes_appended()
+     }
+ 
++    /// #1404 root-cause probe (temporary): current WAL command-channel
++    /// depth (queued-but-unconsumed `WalCmd`s). See
++    /// [`arcgraph_storage::wal::WalHandle::queue_len`].
++    #[must_use]
++    pub fn wal_queue_len(&self) -> usize {
++        self.wal_handle.queue_len()
++    }
++
++    /// #1404 root-cause probe (temporary): spawn a background thread that
++    /// logs the WAL channel depth + byte watermarks every `secs`. If the
++    /// STEP-0 hypothesis holds, `wal_queue_len` grows unbounded during a
++    /// sustained ingest; under Strict/T1 self-throttling it stays small.
++    pub fn spawn_1404_probe(&self, secs: u64) {
++        let wal = self.wal_handle.clone();
++        // The stdio binary ships without a tracing sink (see the bin's tracing
++        // init comment), so `tracing::info!` is dropped. Write the probe samples
++        // DIRECTLY to a file (path from ARCGRAPH_1404_PROBE_FILE, default /tmp).
++        let path = std::env::var("ARCGRAPH_1404_PROBE_FILE")
++            .unwrap_or_else(|_| "/tmp/probe_1404.log".to_owned());
++        std::thread::Builder::new()
++            .name("probe-1404".to_owned())
++            .spawn(move || {
++                use std::io::Write;
++                let mut f = std::fs::OpenOptions::new()
++                    .create(true)
++                    .append(true)
++                    .open(&path)
++                    .ok();
++                let start = std::time::Instant::now();
++                loop {
++                    std::thread::sleep(std::time::Duration::from_secs(secs));
++                    let qlen = wal.queue_len();
++                    let appended = wal.wal_bytes_appended();
++                    let durable = wal.last_durable_lsn().raw();
++                    let t = start.elapsed().as_secs();
++                    if let Some(f) = f.as_mut() {
++                        let _ = writeln!(
++                            f,
++                            "PROBE-1404 t={t}s wal_queue_len={qlen} \
++                             wal_bytes_appended={appended} durable_lsn={durable}"
++                        );
++                        let _ = f.flush();
++                    }
++                }
++            })
++            .ok();
++    }
++
+     /// Establish a full-state checkpoint at the current committed
+     /// frontier. Flushes the catalog buffer pool + writes the full-state
+     /// snapshot + the frontier sidecar, all crash-atomically
+diff --git a/crates/arcgraph-storage/src/wal/writer.rs b/crates/arcgraph-storage/src/wal/writer.rs
+index f4b0b56c..4becdf2a 100644
+--- a/crates/arcgraph-storage/src/wal/writer.rs
++++ b/crates/arcgraph-storage/src/wal/writer.rs
+@@ -293,6 +293,21 @@ impl WalHandle {
+     pub fn wal_bytes_appended(&self) -> u64 {
+         self.wal_bytes_appended.load(Ordering::Acquire)
+     }
++
++    /// #1404 root-cause probe (temporary instrumentation): the current
++    /// number of `WalCmd`s queued in the unbounded crossbeam command
++    /// channel but not yet consumed by the writer thread. This is the
++    /// DIRECT measure of the STEP-0 "unbounded WAL command-channel
++    /// backlog" hypothesis: if ingest under Strict/T1 self-throttles
++    /// (each `append` blocks on its fsync ack), this stays ~O(concurrent
++    /// committers); if the async T3 path outpaces the writer, it grows
++    /// unbounded and each queued `WalCmd::Append` pins its ~16.7 KiB
++    /// CommitBundle payload in RAM.
++    #[inline]
++    #[must_use]
++    pub fn queue_len(&self) -> usize {
++        self.sender.len()
++    }
+ }
+ 
+ /// Lightweight, Send/Sync snapshot of the WAL writer's group-commit

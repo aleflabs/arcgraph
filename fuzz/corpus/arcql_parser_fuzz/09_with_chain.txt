@@ -1,0 +1,1 @@
+MATCH (n:Person) WITH n.age AS a WHERE a > 30 RETURN a
